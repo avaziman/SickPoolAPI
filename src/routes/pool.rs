@@ -157,10 +157,10 @@ pub struct BlockRaw {
     pub number: u32,
     pub difficulty: f64,
     pub effort_percent: f64,
-    pub chain: [i8; 8],
-    pub solver: [i8; 16],
-    pub worker: [i8; 34],
-    pub hash: [i8; 64],
+    pub chain: [u8; 8],
+    pub solver: [u8; 34],
+    pub worker: [u8; 16],
+    pub hash: [u8; 64],
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -308,22 +308,45 @@ impl redis::FromRedisValue for BlockRes {
         for block in block_arr {
             let bytes: Vec<u8> = redis::from_redis_value(&block)?;
             println!("{:?}", bytes);
+            unsafe {
+                let block = Block {
+                    reward: std::mem::transmute_copy::<[u8;8], i64>(&bytes[0..8].try_into().unwrap()),
+                    time: std::mem::transmute_copy::<[u8;8], i64>(&bytes[8..16].try_into().unwrap()),
+                    duration: std::mem::transmute_copy::<[u8;8], i64>(&bytes[16..24].try_into().unwrap()),
+                    height: std::mem::transmute_copy::<[u8;4], u32>(&bytes[24..28].try_into().unwrap()),
+                    number: std::mem::transmute_copy::<[u8;4], u32>(&bytes[28..32].try_into().unwrap()),
+                    difficulty: std::mem::transmute_copy::<[u8;8], f64>(&bytes[32..40].try_into().unwrap()),
+                    effort_percent:std::mem::transmute_copy::<[u8;8], f64>(&bytes[40..48].try_into().unwrap()),
+                    chain: String::from_utf8((&bytes[48..56]).to_vec())?,
+                    solver: String::from_utf8((&bytes[56..90]).to_vec())?,
+                    worker: String::from_utf8((&bytes[90..106]).to_vec())?,
+                    hash: String::from_utf8((&bytes[106..170]).to_vec())?,
+                };
+            println!("BLOCK {:?}", block);
+            results.push(block);
+            }
             // unsafe {
+            //     let block_raw: BlockRaw = std::ptr::read(bytes.as_ptr() as *const _);
+            //     let solver_str = String::from_utf8(block_raw.solver.to_vec())?;
+            //     let worker_str = String::from_utf8(block_raw.worker.to_vec())?;
+            //     let chain_str = String::from_utf8(block_raw.chain.to_vec())?;
+            //     let hash_str = String::from_utf8(block_raw.hash.to_vec())?;
+
             //     let block = Block {
-            //         reward: std::mem::transmute_copy::<[u8;8], i64>(&bytes[0..8].try_into().unwrap()),
-            //         time: std::mem::transmute_copy::<[u8;8], i64>(&bytes[8..16].try_into().unwrap()),
-            //         duration: std::mem::transmute_copy::<[u8;8], i64>(&bytes[16..24].try_into().unwrap()),
-            //         height: std::mem::transmute_copy::<[u8;4], u32>(&bytes[24..28].try_into().unwrap()),
-            //         number: std::mem::transmute_copy::<[u8;4], u32>(&bytes[28..16].try_into().unwrap()),
-            //         difficulty: std::mem::transmute_copy::<[u8;8], i64>(&bytes[8..16].try_into().unwrap()),
-            //         effort_percent:std::mem::transmute_copy::<[u8;8], i64>(&bytes[8..16].try_into().unwrap()),
-            //         chain: String::from_utf8((&bytes[48..56]).to_vec())?,
-            //         solver: String::from_utf8((&bytes[56..90]).to_vec())?,
-            //         worker: String::from_utf8((&bytes[90..106]).to_vec())?,
-            //         hash: String::from_utf8((&bytes[106..170]).to_vec())?,
+            //         reward: block_raw.reward,
+            //         time: block_raw.time,
+            //         duration: block_raw.duration,
+            //         height: block_raw.height,
+            //         number: block_raw.number,
+            //         difficulty: block_raw.difficulty,
+            //         effort_percent: block_raw.effort_percent,
+            //         chain: chain_str,
+            //         solver: solver_str,
+            //         worker: worker_str,
+            //         hash: hash_str,
             //     };
-            // println!("BLOCK {:?}", block);
-            // results.push(block);
+            //     println!("BLOCK {:?}", block);
+            //     // results.push(block);
             // }
         }
         Ok(BlockRes {
