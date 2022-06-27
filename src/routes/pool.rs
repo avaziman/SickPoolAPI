@@ -1,20 +1,49 @@
 use crate::SickApiData;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 extern crate redis;
+
 use redis::AsyncCommands;
 use redis_ts::{AsyncTsCommands, TsAggregationType, TsFilterOptions, TsMget, TsMrange, TsOptions};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
+use super::table_res::TableRes;
+use super::solver::Solver;
+use super::block::Block;
+
 // use redisearch_api::{init, Document, FieldType, Index, TagOptions};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[get("/currentHashrate")]
 async fn current_hashrate(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
-    let con = api_data.redis.clone();
-    // redis::cmd("TS.GET")
+    let mut con = api_data.redis.clone();
 
-    HttpResponse::Ok().body("Hey there!")
+    let latest: (u64, f64) = match con.ts_get("pool_hashrate").await {
+        Ok(res) => match res {
+            Some(tuple) => tuple,
+            None => {
+                return HttpResponse::InternalServerError().body(
+                    json!(
+                        {"error": "Database error", "result": Value::Null}
+                    )
+                    .to_string(),
+                );
+            }
+        },
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().body(
+                json!(
+                    {"error": "Database error", "result": Value::Null}
+                )
+                .to_string(),
+            );
+        }
+    };
+
+    HttpResponse::Ok().body(
+        json!({"result": latest.1, "error": Value::Null})
+        .to_string())        
 }
 
 #[get("/workerCount")]
@@ -23,21 +52,32 @@ async fn worker_count(req: HttpRequest, api_data: web::Data<SickApiData>) -> imp
     // let dbRes : std::result::Result<redis::Value, redis::RedisError> = redis::cmd("TS.GET").arg("VRSC:worker_count")
     //             .query_async(&mut con).await;
     // let dbRes : std::result::Result<u32, redis::RedisError> = redis::cmd("GET").arg("VRSC:1").query_async(&mut con).await;
-    let latest: std::result::Result<Option<(u64, f64)>, redis::RedisError> =
-        con.ts_get("my_engine").await;
-
-    match latest {
+    let latest: (u64, f64) = match con.ts_get("my_engine").await {
         Ok(res) => match res {
-            Some(val) => return HttpResponse::Ok().body(val.1.to_string()),
+            Some(tuple) => tuple,
             None => {
-                return HttpResponse::InternalServerError().body("Empty array");
+                return HttpResponse::InternalServerError().body(
+                    json!(
+                        {"error": "Database error", "result": Value::Null}
+                    )
+                    .to_string(),
+                );
             }
         },
-        Err(err) => {
-            eprintln!("err: {}", err);
-            return HttpResponse::InternalServerError().body("Data not found");
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().body(
+                json!(
+                    {"error": "Database error", "result": Value::Null}
+                )
+                .to_string(),
+            );
         }
-    }
+    };
+
+    HttpResponse::Ok().body(
+        json!({"result": latest.1, "error": Value::Null})
+        .to_string())
 }
 
 // #[get("/stakingBalance")]
@@ -135,7 +175,7 @@ async fn block_number(req: HttpRequest, api_data: web::Data<SickApiData>) -> imp
 }
 
 #[derive(Deserialize)]
-struct BlocksQuery {
+struct Query {
     page: u32,
     limit: u8,
     sortby: String,
@@ -143,58 +183,18 @@ struct BlocksQuery {
     // chains: Vec<String>,
 }
 
-#[derive(Debug)]
-pub struct SearchRes {
-    pub results: Vec<HashMap<String, String>>,
-    pub total: i64,
-}
-#[derive(Debug)]
-pub struct BlockRaw {
-    pub reward: i64,
-    pub time: i64,
-    pub duration: i64,
-    pub height: u32,
-    pub number: u32,
-    pub difficulty: f64,
-    pub effort_percent: f64,
-    pub chain: [u8; 8],
-    pub solver: [u8; 34],
-    pub worker: [u8; 16],
-    pub hash: [u8; 64],
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Block {
-    pub reward: i64,
-    pub time: i64,
-    pub duration: i64,
-    pub height: u32,
-    pub number: u32,
-    pub difficulty: f64,
-    pub effort_percent: f64,
-    pub chain: String,
-    pub solver: String,
-    pub worker: String,
-    pub hash: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BlockRes {
-    pub total: i64,
-    pub blocks: Vec<Block>,
-}
-
 #[get("/blocks")]
-async fn blocks(info: web::Query<BlocksQuery>, api_data: web::Data<SickApiData>) -> impl Responder {
+async fn blocks(info: web::Query<Query>, api_data: web::Data<SickApiData>) -> impl Responder {
     // let offset : u32 = info.page * info.limit as u32;
     //TODO: check validity of sortby and sortdir and chains
 
     let mut sort_index = info.sortby.clone();
-    sort_index.insert_str(0, "block:");
-    println!("{}", sort_index);
+    sort_index.insert_str(0, "block-index:");
+    // println!("{}", sort_index);
 
     let mut con = api_data.redis.clone();
-    let res: BlockRes = redis::cmd("FCALL")
+    //TODO: match
+    let res: TableRes<Block> = match redis::cmd("FCALL")
         .arg("getblocksbyindex")
         .arg(1)
         .arg(sort_index)
@@ -203,22 +203,21 @@ async fn blocks(info: web::Query<BlocksQuery>, api_data: web::Data<SickApiData>)
         // .arg(info.sortdir.to_uppercase())
         .query_async(&mut con)
         .await
-        .unwrap();
+    {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().body(
+                json!(
+                    {"error": "Database error", "result": Value::Null}
+                )
+                .to_string(),
+            );
+        }
+    };
 
     let json_res = json!(res).to_string();
-    // println!("{:?}", res);
-    // match res{
-    //     Ok(it) => {
-    //         let keys : Vec<_> = it.collect();
-    //         println!("{:?}", keys);
     return HttpResponse::Ok().body(json_res);
-
-    //     },
-    //     Err(err) => {
-    //         eprintln!("err: {}", err);
-    //         return HttpResponse::InternalServerError().body("Data not found");
-    //     }
-    // }
 }
 
 #[get("/currentEffortPoW")]
@@ -232,9 +231,20 @@ async fn current_effort_pow(req: HttpRequest, api_data: web::Data<SickApiData>) 
 
     match effort_res {
         Ok(effort_map) => {
-            let effort: f64 = effort_map["total"] / effort_map["estimated"];
-            println!("effort: {:?}", effort);
-
+            let mut effort: f64 = 0.0;
+            match effort_map.get("total") {
+                Some(total) => match effort_map.get("estimated") {
+                    Some(estimated) => {
+                        effort = total / estimated;
+                    }
+                    None => {
+                        eprintln!("Estimated hashes missing!");
+                    }
+                },
+                None => {
+                    eprintln!("Total hashes missing!");
+                }
+            }
             return HttpResponse::Ok().body(effort.to_string());
         }
         Err(err) => {
@@ -286,72 +296,57 @@ pub fn pool_route(cfg: &mut web::ServiceConfig) {
     cfg.service(current_hashrate);
     cfg.service(worker_count);
     cfg.service(block_number);
-    cfg.service(blocks);
     cfg.service(current_effort_pow);
-    cfg.service(dashboard);
+    cfg.service(blocks);
+    cfg.service(solvers);
 }
 
-impl redis::FromRedisValue for BlockRes {
+#[get("/solvers")]
+async fn solvers(info: web::Query<Query>, api_data: web::Data<SickApiData>) -> impl Responder {
+    let solver_index_prefix = "solver-index:";
+
+    let mut con = api_data.redis.clone();
+    let res: TableRes<Solver> = match redis::cmd("FCALL")
+        .arg("getsolversbyindex")
+        .arg(2)
+        .arg(solver_index_prefix)
+        .arg(info.sortby.clone())
+        .arg(info.page * info.limit as u32)
+        .arg((info.page + 1) * info.limit as u32)
+        // .arg(info.sortdir.to_uppercase())
+        .query_async(&mut con)
+        .await
+    {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().body(
+                json!(
+                    {"error": "Database error", "result": Value::Null}
+                )
+                .to_string(),
+            );
+        }
+    };
+
+    let json_res = json!(res).to_string();
+    println!("{:?}", res);
+    // match res{
+    //     Ok(it) => {
+    //         let keys : Vec<_> = it.collect();
+    //         println!("{:?}", keys);
+    return HttpResponse::Ok().body(json_res);
+}
+
+impl redis::FromRedisValue for Solver {
     fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
-        let items: Vec<redis::Value> = redis::from_redis_value(value)?;
-        if items.len() < 2 {
-            return Ok(BlockRes {
-                blocks: vec![],
-                total: 0,
-            });
-        }
-        let total_res_count: i64 = redis::from_redis_value(items.first().unwrap())?;
-
-        let block_arr: Vec<redis::Value> = redis::from_redis_value(&items[1])?;
-        let mut results: Vec<Block> = Vec::new();
-
-        for block in block_arr {
-            let bytes: Vec<u8> = redis::from_redis_value(&block)?;
-            println!("{:?}", bytes);
-            unsafe {
-                let block = Block {
-                    reward: std::mem::transmute_copy::<[u8;8], i64>(&bytes[0..8].try_into().unwrap()),
-                    time: std::mem::transmute_copy::<[u8;8], i64>(&bytes[8..16].try_into().unwrap()),
-                    duration: std::mem::transmute_copy::<[u8;8], i64>(&bytes[16..24].try_into().unwrap()),
-                    height: std::mem::transmute_copy::<[u8;4], u32>(&bytes[24..28].try_into().unwrap()),
-                    number: std::mem::transmute_copy::<[u8;4], u32>(&bytes[28..32].try_into().unwrap()),
-                    difficulty: std::mem::transmute_copy::<[u8;8], f64>(&bytes[32..40].try_into().unwrap()),
-                    effort_percent:std::mem::transmute_copy::<[u8;8], f64>(&bytes[40..48].try_into().unwrap()),
-                    chain: String::from_utf8((&bytes[48..56]).to_vec())?,
-                    solver: String::from_utf8((&bytes[56..90]).to_vec())?,
-                    worker: String::from_utf8((&bytes[90..106]).to_vec())?,
-                    hash: String::from_utf8((&bytes[106..170]).to_vec())?,
-                };
-            println!("BLOCK {:?}", block);
-            results.push(block);
-            }
-            // unsafe {
-            //     let block_raw: BlockRaw = std::ptr::read(bytes.as_ptr() as *const _);
-            //     let solver_str = String::from_utf8(block_raw.solver.to_vec())?;
-            //     let worker_str = String::from_utf8(block_raw.worker.to_vec())?;
-            //     let chain_str = String::from_utf8(block_raw.chain.to_vec())?;
-            //     let hash_str = String::from_utf8(block_raw.hash.to_vec())?;
-
-            //     let block = Block {
-            //         reward: block_raw.reward,
-            //         time: block_raw.time,
-            //         duration: block_raw.duration,
-            //         height: block_raw.height,
-            //         number: block_raw.number,
-            //         difficulty: block_raw.difficulty,
-            //         effort_percent: block_raw.effort_percent,
-            //         chain: chain_str,
-            //         solver: solver_str,
-            //         worker: worker_str,
-            //         hash: hash_str,
-            //     };
-            //     println!("BLOCK {:?}", block);
-            //     // results.push(block);
-            // }
-        }
-        Ok(BlockRes {
-            blocks: results,
-            total: total_res_count,
+        let vec: Vec<String> = redis::from_redis_value(value)?;
+        Ok(Solver {
+            address: vec[0].clone(),
+            hashrate: vec[1].parse().unwrap_or(0f64),
+            balance: vec[2].parse().unwrap_or(0f64),
+            joined: vec[3].parse().unwrap(), // don't handle
+            worker_count: vec[4].parse().unwrap_or(0),
         })
     }
 }
@@ -456,7 +451,7 @@ impl redis::FromRedisValue for BlockRes {
 //             }
 //         };
 
-//         let mut result = Vec::with_capacity(count.try_into().unwrap());
+//         let mut result = Vec::with_capacity(count.try_into().unwrap_or("missing"));
 
 //         while let Some(v) = bulk.next() {
 //             let key = <String as FromRedisValue>::from_redis_value(&v)?;

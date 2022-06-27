@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
 
-use serde::{Serialize};
 use serde_json::json;
 
 extern crate redis;
@@ -57,7 +56,7 @@ pub fn listen_redis(cli: &redis::Client) {
                 match &mut discord_stream {
                     Ok(dstream) => {
                         match dstream.write(json!(block).to_string().as_bytes()){
-                            Ok(size) => {
+                            Ok(_size) => {
                                 println!("Notified discord bot on new message");
                             }, 
                             Err(err) => {
