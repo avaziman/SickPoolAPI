@@ -1,8 +1,9 @@
 use serde::Serialize;
 
-#[repr(C)] // don't modify order
+#[repr(C, packed)] // don't modify order
 #[derive(Debug)]
 pub struct BlockRaw {
+    pub confirmations: i32,
     pub reward: i64,
     pub time: i64,
     pub duration: i64,
@@ -18,6 +19,7 @@ pub struct BlockRaw {
 
 #[derive(Debug, Serialize)]
 pub struct Block {
+    pub confirmations: i32,
     pub reward: i64,
     pub time: i64,
     pub duration: i64,
@@ -39,7 +41,7 @@ impl redis::FromRedisValue for Block {
             bytes.len(),
             std::mem::size_of::<BlockRaw>()
         );
-        if bytes.len() == std::mem::size_of::<BlockRaw>() {
+        // if bytes.len() == std::mem::size_of::<BlockRaw>() {
             let block_res = parse_block(&bytes);
 
             match block_res {
@@ -53,14 +55,14 @@ impl redis::FromRedisValue for Block {
                     // eprintln!("Failed to parse block: {}", err);
                 }
             }
-        } else {
-            Err(redis::RedisError::from((
-                redis::ErrorKind::TypeError,
-                "Failed to deserialize block",
-                format!("response was of wrong length"),
-            )))
-            // eprintln!("Failed to serialize block, wrong size.");
-        }
+        // } else {
+        //     Err(redis::RedisError::from((
+        //         redis::ErrorKind::TypeError,
+        //         "Failed to deserialize block",
+        //         format!("response was of wrong length"),
+        //     )))
+        //     // eprintln!("Failed to serialize block, wrong size.");
+        // }
     }
 }
 
@@ -73,6 +75,7 @@ fn parse_block(bytes: &Vec<u8>) -> std::result::Result<Block, std::string::FromU
         let hash_str = String::from_utf8(block_raw.hash.to_vec())?;
 
         let block = Block {
+            confirmations: block_raw.confirmations,
             reward: block_raw.reward,
             time: block_raw.time,
             duration: block_raw.duration,
@@ -85,7 +88,7 @@ fn parse_block(bytes: &Vec<u8>) -> std::result::Result<Block, std::string::FromU
             worker: worker_str.trim_matches(char::from(0)).to_string(),
             hash: hash_str,
         };
-        // println!("BLOCK {:?}", block);
+        println!("BLOCK {:?}", block);
         // results.push(block);
         return Ok(block);
     }

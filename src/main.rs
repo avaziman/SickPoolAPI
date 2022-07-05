@@ -7,6 +7,7 @@ use std::collections::HashSet;
 mod routes;
 use routes::pool;
 use routes::miner;
+use routes::solver;
 
 mod api_data;
 use api_data::SickApiData;
@@ -61,10 +62,11 @@ async fn main() -> std::io::Result<()> {
                         redis: con_manager.clone(),
                     }))
                     .service(web::scope("/pool").configure(pool::pool_route))
-                    .service(web::scope("/miner").configure(miner::miner_route)),
+                    .service(web::scope("/miner").configure(miner::miner_route))
+                    .service(web::scope("/solver").configure(solver::solver_route)),
             )
             .wrap(cors)
-        .wrap(middleware::Logger::default())
+        // .wrap(middleware::Logger::default())
     })
     .bind(("127.0.0.1", 8080))?
     .run()

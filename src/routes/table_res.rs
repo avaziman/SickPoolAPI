@@ -4,7 +4,7 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct TableRes<T: redis::FromRedisValue> {
     pub total: i64,
-    pub results: Vec<T>,
+    pub result: Vec<T>,
 }
 
 
@@ -13,7 +13,7 @@ impl<T: redis::FromRedisValue> redis::FromRedisValue for TableRes<T> {
         let items: Vec<redis::Value> = redis::from_redis_value(value)?;
         if items.len() < 2 {
             return Ok(TableRes {
-                results: vec![],
+                result: vec![],
                 total: 0,
             });
         }
@@ -27,7 +27,7 @@ impl<T: redis::FromRedisValue> redis::FromRedisValue for TableRes<T> {
             results.push(item);
         }
         Ok(TableRes {
-            results: results,
+            result: results,
             total: total_res_count,
         })
     }
