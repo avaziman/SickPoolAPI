@@ -1,10 +1,11 @@
 use crate::SickApiData;
 
-use super::solver::SolverQuery;
+use super::solver::OverviewQuery;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsMrange, TsRange};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use crate::solver::miner_id_filter;
 
 pub fn miner_route(cfg: &mut web::ServiceConfig) {
     cfg.service(stats_history);
@@ -37,29 +38,20 @@ struct WorkerTsEntry {
 
 #[get("/statsHistory")]
 async fn stats_history(
-    req: HttpRequest,
-    info: web::Query<SolverQuery>,
+    info: web::Query<OverviewQuery>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let tsType = "(miner-hashrate,\
-                miner-hashrate:average,\
-                miner-shares:valid,\
-                miner-shares:stale,\
-                miner-shares:invalid)";
+    let tsType = "(hashrate,\
+                hashrate:average,\
+                shares:valid,\
+                shares:stale,\
+                shares:invalid)";
 
-    let filter: TsFilterOptions = if info.address.is_some() {
-        TsFilterOptions::default()
-            .equals("type", tsType)
-            .equals("address", info.address.as_ref().unwrap())
-    } else if info.id.is_some() {
-        TsFilterOptions::default()
-            .equals("type", tsType)
-            .equals("id", info.id.as_ref().unwrap())
-    } else {
-        return HttpResponse::BadRequest().body("No address or id provided.");
-    };
+    let filter: TsFilterOptions = miner_id_filter(&info.address)
+            .equals("prefix", "miner")
+            .equals("type", tsType);
 
     let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None, filter).await {
         Ok(res) => res,
@@ -75,11 +67,23 @@ async fn stats_history(
         }
     };
 
+    if tms.values.len() != 5 {
+        return HttpResponse::NotFound().body(
+            json!({
+                "error": "Key not found",
+                "result": Value::Null
+            })
+            .to_string(),
+        );
+    }
+
+    let ts = tms.values.first().unwrap();
+
     let mut res_vec: Vec<HashrateEntry> = Vec::new();
-    res_vec.reserve(tms.values.first().unwrap().values.len());
+    res_vec.reserve(ts.values.len());
 
     // timeserieses are sorted by alphabetical order
-    for (i, el) in tms.values.first().unwrap().values.iter().enumerate() {
+    for (i, el) in ts.values.iter().enumerate() {
         res_vec.push(HashrateEntry {
             averageHr: el.1,
             currentHr: tms.values[1].values[i].1,
@@ -102,24 +106,16 @@ async fn stats_history(
 #[get("/workerHistory")]
 async fn worker_history(
     req: HttpRequest,
-    info: web::Query<SolverQuery>,
+    info: web::Query<OverviewQuery>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
     let tsType = "worker-count";
 
-    let filter: TsFilterOptions = if info.address.is_some() {
-        TsFilterOptions::default()
-            .equals("type", tsType)
-            .equals("address", info.address.as_ref().unwrap())
-    } else if info.id.is_some() {
-        TsFilterOptions::default()
-            .equals("type", tsType)
-            .equals("id", info.id.as_ref().unwrap())
-    } else {
-        return HttpResponse::BadRequest().body("No address or id provided.");
-    };
+    let filter: TsFilterOptions = 
+        miner_id_filter(&info.address)
+            .equals("type", tsType);
 
     let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None, filter).await {
         Ok(res) => res,
@@ -135,11 +131,24 @@ async fn worker_history(
         }
     };
 
+    let ts = match tms.values.first() {
+        Some(res) => res,
+        None => {
+            return HttpResponse::NotFound().body(
+                json!({
+                    "error": "Key not found",
+                    "result": Value::Null
+                })
+                .to_string(),
+            );
+        }
+    };
+
     let mut res_vec: Vec<WorkerTsEntry> = Vec::new();
-    res_vec.reserve(tms.values.len());
+    res_vec.reserve(ts.values.len());
 
     // timeserieses are sorted by alphabetical order
-    for (i, el) in tms.values.first().unwrap().values.iter().enumerate() {
+    for (i, el) in ts.values.iter().enumerate() {
         res_vec.push(WorkerTsEntry {
             time: el.0,
             workers: el.1 as u32,
@@ -158,29 +167,21 @@ async fn worker_history(
 #[get("/workers")]
 async fn workers(
     req: HttpRequest,
-    info: web::Query<SolverQuery>,
+    info: web::Query<OverviewQuery>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let keys = "(worker-hashrate,\
-                worker-hashrate:average,\
-                worker-shares:valid,\
-                worker-shares:stale,\
-                worker-shares:invalid)";
+    let keys = "(hashrate,\
+                hashrate:average,\
+                shares:valid,\
+                shares:stale,\
+                shares:invalid)";
 
     let filter: TsFilterOptions;
-    if info.address.is_some() {
-        filter = TsFilterOptions::default()
-            .equals("type", keys)
-            .equals("address", info.address.as_ref().unwrap());
-    } else if info.id.is_some() {
-        filter = TsFilterOptions::default()
-            .equals("type", keys)
-            .equals("id", info.id.as_ref().unwrap());
-    } else {
-        return HttpResponse::BadRequest().body("No address or id provided.");
-    }
+        filter = miner_id_filter(&info.address)
+            .equals("prefix", "worker")
+            .equals("type", keys);
 
     let tms: TsMget<u64, f64> = match con.ts_mget(filter).await {
         Ok(res) => res,
@@ -228,7 +229,7 @@ async fn workers(
 // #[get("/shareHistory")]
 // async fn share_history(
 //     req: HttpRequest,
-//     info: web::Query<SolverQuery>,
+//     info: web::Query<OverviewQuery>,
 //     api_data: web::Data<SickApiData>,
 // ) -> impl Responder {
 //     let mut con = api_data.redis.clone();
@@ -277,7 +278,7 @@ async fn workers(
 // #[get("/workerHistory")]
 // async fn share_history(
 //     req: HttpRequest,
-//     info: web::Query<SolverQuery>,
+//     info: web::Query<OverviewQuery>,
 //     api_data: web::Data<SickApiData>,
 // ) -> impl Responder {
 //     let mut con = api_data.redis.clone();

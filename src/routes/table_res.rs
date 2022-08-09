@@ -19,12 +19,16 @@ impl<T: redis::FromRedisValue> redis::FromRedisValue for TableRes<T> {
         }
         let total_res_count: i64 = redis::from_redis_value(items.first().unwrap())?;
 
-        let block_arr: Vec<redis::Value> = redis::from_redis_value(&items[1])?;
+        let item_arr: Vec<redis::Value> = redis::from_redis_value(&items[1])?;
         let mut results: Vec<T> = Vec::new();
 
-        for block in block_arr {
-            let item: T = redis::from_redis_value(&block)?;
-            results.push(item);
+        for item in item_arr {
+            match redis::from_redis_value(&item){
+                Ok(res) => results.push(res),
+                Err(err) => {
+                    eprintln!("Failed to parse item {:?}, err: {}", item, err);
+                }
+            }
         }
         Ok(TableRes {
             result: results,

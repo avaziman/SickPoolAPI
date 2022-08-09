@@ -2,7 +2,7 @@ use crate::SickApiData;
 
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use redis::Commands;
-use redis_ts::{AsyncTsCommands, TsFilterOptions, TsRange, TsMget};
+use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsRange};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -16,9 +16,9 @@ pub struct Solver {
 }
 
 #[derive(Deserialize)]
-pub struct SolverQuery {
-    pub address: std::option::Option<String>,
-    pub id: std::option::Option<String>,
+pub struct OverviewQuery {
+    pub coin: String,
+    pub address: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -28,35 +28,33 @@ struct BalanceEntry {
 }
 
 pub fn solver_route(cfg: &mut web::ServiceConfig) {
-    cfg.service(balance);
+    cfg.service(overview);
 }
 
-#[get("/balance")]
-async fn balance(
-    req: HttpRequest,
-    info: web::Query<SolverQuery>,
+#[get("/overview")]
+async fn overview(
+    info: web::Query<OverviewQuery>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let tsType = "immature-balance";
+    // lowercase or id_tag@ to valid address
+    let key = info.coin.clone() + ":address-map";
 
-    let filter: TsFilterOptions = if info.address.is_some() {
-        TsFilterOptions::default()
-            .equals("type", tsType)
-            .equals("address", info.address.as_ref().unwrap())
-    } else if info.id.is_some() {
-        TsFilterOptions::default()
-            .equals("type", tsType)
-            .equals("id", info.id.as_ref().unwrap())
-    } else {
-        return HttpResponse::BadRequest().body("No address or id provided.");
+    let field_addr = if info.address.ends_with('@'){
+        info.address.clone()
+    }else {
+        info.address.to_lowercase()
     };
 
-    let immature_balance_tms: TsMget<u64,f64> = match con.ts_mget(filter).await {
-        Ok(res) => res,
+    let address: String = match redis::cmd("HGET")
+        .arg(key)
+        .arg(&field_addr)
+        .query_async(&mut con)
+        .await
+    {
+        Ok(r) => r,
         Err(err) => {
-            eprintln!("range query error: {}", err);
             return HttpResponse::NotFound().body(
                 json!({
                     "error": "Key not found",
@@ -67,25 +65,55 @@ async fn balance(
         }
     };
 
-    let immature_balance = immature_balance_tms.values.first().unwrap().value.unwrap();
-    // let immate_balance = match immature_balance_tms.values().first().value(){
-    //     Some(res) => res,
-    //     None => (0,0)
-    // };
+    let solver_key = info.coin.clone() + ":solver:" + &address;
 
-    return HttpResponse::Ok().body(
+    let (immature_balance, mature_balance, identity): (
+        u64,
+        u64,
+        Option<String>,
+    ) = match redis::cmd("HMGET")
+        .arg(&solver_key)
+        .arg("immature-balance")
+        .arg("mature-balance")
+        .arg("identity")
+        .query_async(&mut con)
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("Overview redis err: {}", err);
+            return HttpResponse::NotFound().body(
+                json!({
+                    "error": "Failed to get overview",
+                    "result": Value::Null
+                })
+                .to_string(),
+            );
+        }
+    };
+
+    HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
-            "result": {"immature": immature_balance.1}
+            "result": {"address": address, "balance": {"mature": mature_balance, "immature": immature_balance}, "identity": identity}
         })
         .to_string(),
-    );
+    )
 }
+
+pub fn miner_id_filter(addr: &String) -> TsFilterOptions{
+    if addr.ends_with('@'){
+        TsFilterOptions::default().equals("identity", addr)
+    }else {
+        TsFilterOptions::default().equals("address", addr)
+    }
+}
+
 
 // #[get("/balanceHistory")]
 // async fn balance_history(
 //     req: HttpRequest,
-//     info: web::Query<SolverQuery>,
+//     info: web::Query<OverviewQuery>,
 //     api_data: web::Data<SickApiData>,
 // ) -> impl Responder {
 //     let mut con = api_data.redis.clone();

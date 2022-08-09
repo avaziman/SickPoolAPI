@@ -2,9 +2,13 @@ use crate::SickApiData;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 extern crate redis;
 
-use redis::AsyncCommands;
-use redis_ts::{AsyncTsCommands, TsAggregationType, TsFilterOptions, TsMget, TsMrange, TsOptions, TsRange};
+use redis::aio::ConnectionManager;
+use redis::{AsyncCommands, FromRedisValue};
+use redis_ts::{
+    AsyncTsCommands, TsAggregationType, TsFilterOptions, TsMget, TsMrange, TsOptions, TsRange,
+};
 use serde_json::{json, Value};
+use std::arch::x86_64::_mm_comineq_sd;
 use std::collections::HashMap;
 
 use super::block::Block;
@@ -14,43 +18,85 @@ use super::table_res::TableRes;
 // use redisearch_api::{init, Document, FieldType, Index, TagOptions};
 use serde::Deserialize;
 
-// #[get("/currentHashrate")]
-// async fn current_hashrate(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
-//     let mut con = api_data.redis.clone();
+#[derive(Deserialize)]
+struct CoinQuery {
+    coin: String,
+}
 
-//     let latest: (u64, f64) = match con.ts_get("pool_hashrate").await {
-//         Ok(res) => match res {
-//             Some(tuple) => tuple,
-//             None => {
-//                 return HttpResponse::InternalServerError().body(
-//                     json!(
-//                         {"error": "Database error", "result": Value::Null}
-//                     )
-//                     .to_string(),
-//                 );
-//             }
-//         },
-//         Err(e) => {
-//             eprintln!("Database error: {}", e);
-//             return HttpResponse::InternalServerError().body(
-//                 json!(
-//                     {"error": "Database error", "result": Value::Null}
-//                 )
-//                 .to_string(),
-//             );
-//         }
-//     };
 
-//     HttpResponse::Ok().body(json!({"result": latest.1, "error": Value::Null}).to_string())
-// }
+pub fn pool_route(cfg: &mut web::ServiceConfig) {
+    cfg.service(staking_balance);
+    cfg.service(current_hashrate);
+    cfg.service(worker_count);
+    cfg.service(block_number);
+    cfg.service(current_effort_pow);
+    cfg.service(blocks);
+    cfg.service(solvers);
+    cfg.service(hashrate_history);
+}
+
+#[get("/hashrateHistory")]
+async fn hashrate_history(
+    api_data: web::Data<SickApiData>,
+    info: web::Query<CoinQuery>,
+) -> impl Responder {
+    let mut con = api_data.redis.clone();
+
+    let key = info.coin.clone() + ":hashrate:pool";
+
+    let tms: TsRange<u64, f64> = match con.ts_range(key, 0, "+", None::<usize>, None).await {
+        Ok(res) => res,
+        Err(err) => {
+            eprintln!("range query error: {}", err);
+            return HttpResponse::NotFound().body(
+                json!({
+                    "error": "Key not found",
+                    "result": Value::Null
+                })
+                .to_string(),
+            );
+        }
+    };
+
+    let mut res_vec: Vec<(u64, f64)> = Vec::new();
+    for (i, el) in tms.values.iter().enumerate() {
+        res_vec.push((el.0, el.1));
+    }
+
+    HttpResponse::Ok().body(
+        json!({
+            "error": Value::Null,
+            "result": res_vec
+        })
+        .to_string(),
+    )
+}
+
+#[get("/currentHashrate")]
+async fn current_hashrate(
+    info: web::Query<CoinQuery>,
+    api_data: web::Data<SickApiData>,
+) -> impl Responder {
+    let mut con = api_data.redis.clone();
+
+    let key = info.coin.clone() + ":hashrate:pool";
+
+    return TsGetRes(&mut con, &key).await;
+}
 
 #[get("/workerCount")]
-async fn worker_count(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
+async fn worker_count(
+    api_data: web::Data<SickApiData>,
+    info: web::Query<CoinQuery>,
+) -> impl Responder {
     let mut con = api_data.redis.clone();
-    // let dbRes : std::result::Result<redis::Value, redis::RedisError> = redis::cmd("TS.GET").arg("VRSC:worker_count")
-    //             .query_async(&mut con).await;
-    // let dbRes : std::result::Result<u32, redis::RedisError> = redis::cmd("GET").arg("VRSC:1").query_async(&mut con).await;
-    let latest: (u64, f64) = match con.ts_get("my_engine").await {
+    let key = info.coin.clone() + ":worker-count:pool";
+
+    return TsGetRes(&mut con, &key).await;
+}
+
+async fn TsGetRes(con: &mut ConnectionManager, key: &String) -> impl Responder {
+    let latest: (u64, f64) = match con.ts_get(key).await {
         Ok(res) => match res {
             Some(tuple) => tuple,
             None => {
@@ -66,7 +112,7 @@ async fn worker_count(req: HttpRequest, api_data: web::Data<SickApiData>) -> imp
             eprintln!("Database error: {}", e);
             return HttpResponse::InternalServerError().body(
                 json!(
-                    {"error": "Database error", "result": Value::Null}
+                    {"error": "Database empty error", "result": Value::Null}
                 )
                 .to_string(),
             );
@@ -171,7 +217,8 @@ async fn block_number(req: HttpRequest, api_data: web::Data<SickApiData>) -> imp
 }
 
 #[derive(Deserialize)]
-struct Query {
+struct TableQuery {
+    coin: String,
     page: u32,
     limit: u8,
     sortby: String,
@@ -180,18 +227,17 @@ struct Query {
 }
 
 #[get("/blocks")]
-async fn blocks(info: web::Query<Query>, api_data: web::Data<SickApiData>) -> impl Responder {
+async fn blocks(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> impl Responder {
     // let offset : u32 = info.page * info.limit as u32;
     //TODO: check validity of sortby and sortdir and chains
 
-    let mut sort_index = info.sortby.clone();
-    sort_index.insert_str(0, "block-index:");
+    let mut sort_index = info.coin.clone() + "block-index:" + &info.sortby;
     // println!("{}", sort_index);
 
     let mut con = api_data.redis.clone();
     //TODO: match
 
-    let mut cmd = redis::cmd("FCALL");
+    let mut cmd = redis::cmd("FCALL"); //make read-only
 
     cmd.arg("getblocksbyindex")
         .arg(1)
@@ -203,8 +249,19 @@ async fn blocks(info: web::Query<Query>, api_data: web::Data<SickApiData>) -> im
         cmd.arg("REV");
     }
 
-    let res: TableRes<Block> = match cmd.query_async(&mut con).await {
-        Ok(res) => res,
+    return CmdRes::<TableRes<Block>>(&mut con, &cmd).await;
+}
+
+#[get("/currentEffortPoW")]
+async fn current_effort_pow(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
+    let mut con = api_data.redis.clone();
+    let (total, estimated): (f64, f64) = match redis::pipe()
+        .hget("VRSCTEST:round:pow:effort", "$total")
+        .hget("VRSCTEST:round:pow:effort", "$estimated")
+        .query_async(&mut con)
+        .await
+    {
+        Ok((total, estimated)) => (total, estimated),
         Err(e) => {
             eprintln!("Database error: {}", e);
             return HttpResponse::InternalServerError().body(
@@ -216,106 +273,26 @@ async fn blocks(info: web::Query<Query>, api_data: web::Data<SickApiData>) -> im
         }
     };
 
-    let json_res = json!(res).to_string();
-    return HttpResponse::Ok().body(json_res);
-}
-
-#[get("/currentEffortPoW")]
-async fn current_effort_pow(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
-    let mut con = api_data.redis.clone();
-    let effort_res: std::result::Result<HashMap<String, f64>, redis::RedisError> =
-        redis::cmd("HGETALL")
-            .arg("VRSCTEST:round_effort_pow")
-            .query_async(&mut con)
-            .await;
-
-    match effort_res {
-        Ok(effort_map) => {
-            let mut effort: f64 = 0.0;
-            match effort_map.get("total") {
-                Some(total) => match effort_map.get("estimated") {
-                    Some(estimated) => {
-                        effort = total / estimated;
-                    }
-                    None => {
-                        eprintln!("Estimated hashes missing!");
-                    }
-                },
-                None => {
-                    eprintln!("Total hashes missing!");
-                }
-            }
-            return HttpResponse::Ok().body(effort.to_string());
-        }
-        Err(err) => {
-            eprintln!("err: {}", err);
-            return HttpResponse::InternalServerError().body("Data not found");
-        }
-    }
-}
-
-pub fn pool_route(cfg: &mut web::ServiceConfig) {
-    cfg.service(staking_balance);
-    // cfg.service(current_hashrate);
-    cfg.service(worker_count);
-    cfg.service(block_number);
-    cfg.service(current_effort_pow);
-    cfg.service(blocks);
-    cfg.service(solvers);
-    cfg.service(hashrate_history);
-}
-
-#[get("/hashrateHistory")]
-async fn hashrate_history(api_data: web::Data<SickApiData>) -> impl Responder {
-    let mut con = api_data.redis.clone();
-
-    let tms: TsRange<u64, f64> = match con
-        .ts_range(
-            "hashrate:pool:IL",
-            0,
-            "+",
-            None::<usize>,
-            None
-        )
-        .await
-    {
-        Ok(res) => res,
-        Err(err) => {
-            eprintln!("range query error: {}", err);
-            return HttpResponse::NotFound().body(
-                json!({
-                    "error": "Key not found",
-                    "result": Value::Null
-                })
-                .to_string(),
-            );
-        }
-    };
-
-    let mut res_vec: Vec<(u64, f64)> = Vec::new();
-    for (i, el) in tms.values.iter().enumerate() {
-        res_vec.push((el.0, el.1));
-    }
-
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
-            "result": res_vec
+            "result": total / estimated
         })
         .to_string(),
     )
 }
 
-#[get("/solvers")]
-async fn solvers(info: web::Query<Query>, api_data: web::Data<SickApiData>) -> impl Responder {
-    let solver_index_prefix = "solver-index:";
 
+#[get("/solvers")]
+async fn solvers(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> impl Responder {
     let mut con = api_data.redis.clone();
-    let mut cmd = redis::cmd("FCALL");
+    let solver_index_prefix = info.coin.clone() + ":solver-index:" + &info.sortby.clone();
+
+    let mut cmd = redis::cmd("FCALL"); // make read-only
     cmd.arg("getsolversbyindex")
         .arg(2)
         .arg(solver_index_prefix)
-        .arg(info.sortby.clone())
+        .arg(info.coin.clone() + ":solver:")
         .arg(info.page * info.limit as u32)
         .arg((info.page + 1) * info.limit as u32 - 1);
 
@@ -323,10 +300,14 @@ async fn solvers(info: web::Query<Query>, api_data: web::Data<SickApiData>) -> i
         cmd.arg("REV");
     }
 
-    let res: TableRes<Solver> = match cmd
-        .query_async(&mut con)
-        .await
-    {
+    return CmdRes::<TableRes<Solver>>(&mut con, &cmd).await;
+}
+
+async fn CmdRes<T: serde::Serialize + FromRedisValue>(
+    con: &mut ConnectionManager,
+    cmd: &redis::Cmd,
+) -> impl Responder {
+    let res: T = match cmd.query_async(con).await {
         Ok(res) => res,
         Err(e) => {
             eprintln!("Database error: {}", e);
@@ -339,18 +320,26 @@ async fn solvers(info: web::Query<Query>, api_data: web::Data<SickApiData>) -> i
         }
     };
 
-    let json_res = json!(res).to_string();
-    println!("{:?}", res);
-    // match res{
-    //     Ok(it) => {
-    //         let keys : Vec<_> = it.collect();
-    //         println!("{:?}", keys);
+    let json_res = json!({"result":
+            res, "error": Value::Null
+    })
+    .to_string();
+
     return HttpResponse::Ok().body(json_res);
 }
 
 impl redis::FromRedisValue for Solver {
     fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
         let vec: Vec<String> = redis::from_redis_value(value)?;
+
+        if vec.len() != 5 {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::TypeError,
+                "Failed to parse solver",
+                format!("Failed to parse solver {:?}", value),
+            )));
+        };
+
         Ok(Solver {
             address: vec[0].clone(),
             hashrate: vec[1].parse().unwrap_or(0f64),

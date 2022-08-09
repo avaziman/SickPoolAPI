@@ -4,6 +4,7 @@ use serde::Serialize;
 #[derive(Debug)]
 pub struct BlockRaw {
     pub confirmations: i32,
+    pub block_type: u8,
     pub reward: i64,
     pub time: i64,
     pub duration: i64,
@@ -20,6 +21,7 @@ pub struct BlockRaw {
 #[derive(Debug, Serialize)]
 pub struct Block {
     pub confirmations: i32,
+    pub block_type: u8,
     pub reward: i64,
     pub time: i64,
     pub duration: i64,
@@ -76,6 +78,7 @@ fn parse_block(bytes: &Vec<u8>) -> std::result::Result<Block, std::string::FromU
 
         let block = Block {
             confirmations: block_raw.confirmations,
+            block_type: block_raw.block_type,
             reward: block_raw.reward,
             time: block_raw.time,
             duration: block_raw.duration,

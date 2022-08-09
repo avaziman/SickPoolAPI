@@ -15,8 +15,6 @@ use api_data::SickApiData;
 mod pool_events;
 use pool_events::listen_redis;
 
-static COIN: &str = "VRSC";
-
 #[get("/hello/{name}")]
 async fn greet(name: web::Path<String>) -> impl Responder {
     format!("Hello {name}!")
