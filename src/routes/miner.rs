@@ -15,13 +15,14 @@ pub fn miner_route(cfg: &mut web::ServiceConfig) {
 
 #[repr(C)]
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct HashrateEntry {
-    averageHr: f64,
-    currentHr: f64,
-    invalidShares: f64,
-    staleShares: f64,
+    average_hr: f64,
+    current_hr: f64,
+    invalid_shares: u64,
+    stale_shares: u64,
     time: u64,
-    validShares: f64,
+    valid_shares: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -43,7 +44,7 @@ async fn stats_history(
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let tsType = "(hashrate,\
+    let ts_type = "(hashrate,\
                 hashrate:average,\
                 shares:valid,\
                 shares:stale,\
@@ -51,7 +52,7 @@ async fn stats_history(
 
     let filter: TsFilterOptions = miner_id_filter(&info.address)
             .equals("prefix", "miner")
-            .equals("type", tsType);
+            .equals("type", ts_type);
 
     let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None, filter).await {
         Ok(res) => res,
@@ -85,12 +86,12 @@ async fn stats_history(
     // timeserieses are sorted by alphabetical order
     for (i, el) in ts.values.iter().enumerate() {
         res_vec.push(HashrateEntry {
-            averageHr: el.1,
-            currentHr: tms.values[1].values[i].1,
-            invalidShares: tms.values[2].values[i].1,
-            staleShares: tms.values[3].values[i].1,
-            time: el.0,
-            validShares: tms.values[4].values[i].1,
+            average_hr: el.1,
+            current_hr: tms.values[1].values[i].1,
+            invalid_shares: tms.values[2].values[i].1 as u64,
+            stale_shares: tms.values[3].values[i].1 as u64,
+            time: el.0 / 1000, // seconds not ms
+            valid_shares: tms.values[4].values[i].1 as u64,
         });
     }
 
@@ -111,11 +112,11 @@ async fn worker_history(
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let tsType = "worker-count";
+    let ts_type = "worker-count";
 
     let filter: TsFilterOptions = 
         miner_id_filter(&info.address)
-            .equals("type", tsType);
+            .equals("type", ts_type);
 
     let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None, filter).await {
         Ok(res) => res,
@@ -207,12 +208,12 @@ async fn workers(
         res_vec.push(WorkerStatsEntry {
             worker: String::from(worker_vec[1]),
             stats: HashrateEntry {
-                averageHr: tms.values[i].value.unwrap().1,
-                currentHr: tms.values[i + 1 * worker_count].value.unwrap().1,
-                invalidShares: tms.values[i + worker_count * 2].value.unwrap().1,
-                staleShares: tms.values[i + worker_count + 3].value.unwrap().1,
+                average_hr: tms.values[i].value.unwrap().1,
+                current_hr: tms.values[i + 1 * worker_count].value.unwrap().1,
+                invalid_shares: tms.values[i + worker_count * 2].value.unwrap().1 as u64,
+                stale_shares: tms.values[i + worker_count + 3].value.unwrap().1 as u64,
                 time: tms.values[i].value.unwrap().0,
-                validShares: tms.values[i + worker_count * 4].value.unwrap().1,
+                valid_shares: tms.values[i + worker_count * 4].value.unwrap().1 as u64,
             },
         });
     }
@@ -220,7 +221,10 @@ async fn workers(
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
-            "result": res_vec
+            "result": {
+                "total": res_vec.len(),
+                "entries": res_vec,
+            }
         })
         .to_string(),
     )

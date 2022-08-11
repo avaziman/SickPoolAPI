@@ -23,11 +23,21 @@ struct CoinQuery {
     coin: String,
 }
 
+#[derive(Deserialize)]
+struct TableQuery {
+    coin: String,
+    page: u32,
+    limit: u8,
+    sortby: String,
+    sortdir: String,
+    // chains: Vec<String>,
+}
 
 pub fn pool_route(cfg: &mut web::ServiceConfig) {
     cfg.service(staking_balance);
     cfg.service(current_hashrate);
     cfg.service(worker_count);
+    cfg.service(miner_count);
     cfg.service(block_number);
     cfg.service(current_effort_pow);
     cfg.service(blocks);
@@ -60,7 +70,8 @@ async fn hashrate_history(
 
     let mut res_vec: Vec<(u64, f64)> = Vec::new();
     for (i, el) in tms.values.iter().enumerate() {
-        res_vec.push((el.0, el.1));
+        // time in unix seconds not ms to save bandwidth
+        res_vec.push((el.0 / 1000, el.1));
     }
 
     HttpResponse::Ok().body(
@@ -81,7 +92,7 @@ async fn current_hashrate(
 
     let key = info.coin.clone() + ":hashrate:pool";
 
-    return TsGetRes(&mut con, &key).await;
+    return ts_get_res::<f64>(&mut con, &key).await;
 }
 
 #[get("/workerCount")]
@@ -92,11 +103,19 @@ async fn worker_count(
     let mut con = api_data.redis.clone();
     let key = info.coin.clone() + ":worker-count:pool";
 
-    return TsGetRes(&mut con, &key).await;
+    return ts_get_res::<u64>(&mut con, &key).await;
 }
 
-async fn TsGetRes(con: &mut ConnectionManager, key: &String) -> impl Responder {
-    let latest: (u64, f64) = match con.ts_get(key).await {
+#[get("/minerCount")]
+async fn miner_count(api_data: web::Data<SickApiData>, info: web::Query<CoinQuery>) -> impl Responder {
+    let mut con = api_data.redis.clone();
+    let key = info.coin.clone() + ":miner-count:pool";
+
+    return ts_get_res::<u64>(&mut con, &key).await;
+}
+
+async fn ts_get_res<T: serde::Serialize + FromRedisValue>(con: &mut ConnectionManager, key: &String) -> impl Responder {
+    let latest: (u64, T) = match con.ts_get(key).await {
         Ok(res) => match res {
             Some(tuple) => tuple,
             None => {
@@ -121,36 +140,6 @@ async fn TsGetRes(con: &mut ConnectionManager, key: &String) -> impl Responder {
 
     HttpResponse::Ok().body(json!({"result": latest.1, "error": Value::Null}).to_string())
 }
-
-// #[get("/stakingBalance")]
-// async fn staking_balance(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
-//     let mut con = api_data.redis.clone();
-//     // let dbRes : std::result::Result<redis::Value, redis::RedisError> = redis::cmd("TS.GET").arg("VRSC:worker_count")
-//     //             .query_async(&mut con).await;
-//     // let dbRes : std::result::Result<u32, redis::RedisError> = redis::cmd("GET").arg("VRSC:1").query_async(&mut con).await;
-//     let latest_balances: std::result::Result<TsMget<u64, f64>, redis::RedisError> = con
-//         .ts_mget(
-//             TsFilterOptions::default()
-//                 .with_labels(true)
-//                 .equals("type", "balance"),
-//         )
-//         .await;
-
-//     match latest_balances {
-//        Ok(res) => {
-//             let mut sum : f64 = 0.0;
-
-//             for entry in res.values.iter(){
-//                 for values in entry.value{
-//                     sum += values.1;
-//                 }
-//             }redis::cmd("FT.SEARCH")
-//         Err(err) => {
-//             eprintln!("err: {}", err);
-//             return HttpResponse::InternalServerError().body("Data not found");
-//         }
-//     }
-// }
 
 #[get("/stakingBalance")]
 async fn staking_balance(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
@@ -189,13 +178,7 @@ async fn staking_balance(req: HttpRequest, api_data: web::Data<SickApiData>) -> 
     }
 }
 
-// #[get("/minerCount")]
-// async fn current_hashrate(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
-//     let con = api_data.redis.clone();
-//     redis::cmd("TS.GET")
 
-//     HttpResponse::Ok().body("Hey there!")
-// }
 #[get("/blockNumber")]
 async fn block_number(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
     let mut con = api_data.redis.clone();
@@ -214,42 +197,6 @@ async fn block_number(req: HttpRequest, api_data: web::Data<SickApiData>) -> imp
         }
     }
     // return HttpResponse::Ok();
-}
-
-#[derive(Deserialize)]
-struct TableQuery {
-    coin: String,
-    page: u32,
-    limit: u8,
-    sortby: String,
-    sortdir: String,
-    // chains: Vec<String>,
-}
-
-#[get("/blocks")]
-async fn blocks(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> impl Responder {
-    // let offset : u32 = info.page * info.limit as u32;
-    //TODO: check validity of sortby and sortdir and chains
-
-    let mut sort_index = info.coin.clone() + "block-index:" + &info.sortby;
-    // println!("{}", sort_index);
-
-    let mut con = api_data.redis.clone();
-    //TODO: match
-
-    let mut cmd = redis::cmd("FCALL"); //make read-only
-
-    cmd.arg("getblocksbyindex")
-        .arg(1)
-        .arg(sort_index)
-        .arg(info.page * info.limit as u32) // offset
-        .arg(info.page * info.limit as u32 + info.limit as u32 - 1); // num (limit)
-
-    if info.sortdir == "desc" {
-        cmd.arg("REV");
-    }
-
-    return CmdRes::<TableRes<Block>>(&mut con, &cmd).await;
 }
 
 #[get("/currentEffortPoW")]
@@ -282,6 +229,33 @@ async fn current_effort_pow(req: HttpRequest, api_data: web::Data<SickApiData>) 
     )
 }
 
+#[get("/blocks")]
+async fn blocks(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> impl Responder {
+    // let offset : u32 = info.page * info.limit as u32;
+    //TODO: check validity of sortby and sortdir and chains
+
+    let sort_index = info.coin.clone() + ":block-index:" + &info.sortby;
+    // println!("{}", sort_index);
+
+    let mut con = api_data.redis.clone();
+    let block_prefix = info.coin.clone() + ":block:";
+
+    let mut cmd = redis::cmd("FCALL"); //make read-only
+
+    cmd.arg("getblocksbyindex")
+        .arg(2)
+        .arg(sort_index)
+        .arg(&block_prefix)
+        .arg(info.page * info.limit as u32) // offset
+        .arg(info.page * info.limit as u32 + info.limit as u32 - 1); // num (limit)
+
+    if info.sortdir == "desc" {
+        cmd.arg("REV");
+    }
+
+    return cmd_res::<TableRes<Block>>(&mut con, &cmd).await;
+}
+
 
 #[get("/solvers")]
 async fn solvers(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> impl Responder {
@@ -300,10 +274,10 @@ async fn solvers(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>)
         cmd.arg("REV");
     }
 
-    return CmdRes::<TableRes<Solver>>(&mut con, &cmd).await;
+    return cmd_res::<TableRes<Solver>>(&mut con, &cmd).await;
 }
 
-async fn CmdRes<T: serde::Serialize + FromRedisValue>(
+pub async fn cmd_res<T: serde::Serialize + FromRedisValue>(
     con: &mut ConnectionManager,
     cmd: &redis::Cmd,
 ) -> impl Responder {
@@ -349,124 +323,3 @@ impl redis::FromRedisValue for Solver {
         })
     }
 }
-
-// impl redis::FromRedisValue for BlockRes {
-//     fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
-//         let search_res: SearchRes = redis::from_redis_value(value).unwrap();
-//         println!("{:?}", search_res);
-//         let mut blocks_vec: Vec<Block> = Vec::new();
-//         // TODO: exception handle
-//         for item in search_res.results {
-//             // let block = parse_block(item);
-//             // match block {
-//             //     Ok(block) => blocks_vec.push(block),
-//             //     Err(err) => eprintln!("Failed to parse block: {}", err),
-//             }
-//         }
-
-//         Ok(BlockRes {
-//             blocks: blocks_vec,
-//             total: search_res.total,
-//         })
-//     }
-// }
-
-// pub enum BlockStatus {
-//     Rejected = 0,
-//     Accepted = 1,
-// }
-
-// pub fn parse_block(hm: HashMap<String, String>) -> Result<Block, String> {
-//     let block = Block {
-//         number: hm
-//             .get("number")
-//             .ok_or("No number key")?
-//             .parse::<u32>()
-//             .unwrap(),
-//         height: hm
-//             .get("height")
-//             .ok_or("No height key")?
-//             .parse::<u32>()
-//             .unwrap(),
-//         chain: hm.get("chain").ok_or("No chain key")?.to_string(),
-//         block_type: hm.get("type").ok_or("No type key")?.to_string(),
-//         is_accepted: if hm
-//             .get("accepted")
-//             .ok_or("No accepted key")?
-//             .parse::<u8>()
-//             .unwrap()
-//             == 1
-//         {
-//             true
-//         } else {
-//             false
-//         },
-//         time: hm.get("time").ok_or("No time key")?.parse::<u64>().unwrap(),
-//         duration: hm
-//             .get("duration")
-//             .ok_or("No duration key")?
-//             .parse::<u64>()
-//             .unwrap(),
-//         solver: hm.get("solver").ok_or("No solver key")?.to_string(),
-//         reward: hm
-//             .get("reward")
-//             .ok_or("No reward key")?
-//             .parse::<u64>()
-//             .unwrap(),
-//         difficulty: hm
-//             .get("difficulty")
-//             .ok_or("No difficulty key")?
-//             .parse::<f64>()
-//             .unwrap(),
-//         effort_percent: hm
-//             .get("effort_percent")
-//             .ok_or("No effort_percent key")?
-//             .parse::<f64>()
-//             .unwrap(),
-//         hash: hm.get("hash").ok_or("No hash key")?.to_string(),
-//     };
-//     Ok(block)
-// }
-
-// impl<T: redis::FromRedisValue> redis::FromRedisValue for FtQuery<T> {
-//     fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
-//         let mut bulk = match v {
-//             redis::Value::Bulk(v) => v.into_iter(),
-//             _ => {
-//                 return Err(redis::RedisError::from((
-//                     redis::ErrorKind::TypeError,
-//                     "Type error",
-//                 )))
-//             }
-//         };
-
-//         let count = match bulk.next() {
-//             Some(redis::Value::Int(v)) => *v,
-//             _ => {
-//                 return Err(redis::RedisError::from((
-//                     redis::ErrorKind::TypeError,
-//                     "Type error",
-//                 )))
-//             }
-//         };
-
-//         let mut result = Vec::with_capacity(count.try_into().unwrap_or("missing"));
-
-//         while let Some(v) = bulk.next() {
-//             let key = <String as FromRedisValue>::from_redis_value(&v)?;
-//             let value = match bulk.next() {
-//                 Some(redis::Value::Bulk(v)) => T::from_redis_value(v.last().unwrap())?,
-//                 _ => {
-//                     return Err(redis::RedisError::from((
-//                         redis::ErrorKind::TypeError,
-//                         "Type error",
-//                     )))
-//                 }
-//             };
-//             result.push((key, value));
-//         }
-
-//         Ok(Self { container: result })
-//     }
-// }
-//TODO: make general for search then specify for blocks

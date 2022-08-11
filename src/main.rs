@@ -2,7 +2,6 @@ use actix_web::{get, web, App, HttpServer, Responder, middleware};
 extern crate redis;
 // use redis::Commands;
 use env_logger::Env;
-use std::collections::HashSet;
 
 mod routes;
 use routes::pool;
@@ -37,7 +36,7 @@ async fn main() -> std::io::Result<()> {
 
     println!("Connecting to redisDB...");
     let client = redis::Client::open("redis://127.0.0.1/").expect("Can't create Redis client");
-    let mut con_manager: redis::aio::ConnectionManager = client
+    let con_manager: redis::aio::ConnectionManager = client
         .get_tokio_connection_manager()
         .await
         .expect("Can't create Redis connection manager");

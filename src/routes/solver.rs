@@ -5,6 +5,7 @@ use redis::Commands;
 use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsRange};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use super::table_res::TableRes;
 
 #[derive(Debug, Serialize)]
 pub struct Solver {
@@ -120,11 +121,11 @@ pub fn miner_id_filter(addr: &String) -> TsFilterOptions{
 
 //     let filter: TsFilterOptions = if info.address.is_some() {
 //         TsFilterOptions::default()
-//             .equals("type", tsType)
+//             .equals("type", ts_type)
 //             .equals("address", info.address.as_ref().unwrap())
 //     } else if info.id.is_some() {
 //         TsFilterOptions::default()
-//             .equals("type", tsType)
+//             .equals("type", ts_type)
 //             .equals("id", info.id.as_ref().unwrap())
 //     } else {
 //         return HttpResponse::BadRequest().body("No address or id provided.");
