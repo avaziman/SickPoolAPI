@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 #[repr(C, packed)] // don't modify order
-#[derive(Debug)]
+#[derive()]
 pub struct BlockRaw {
     pub confirmations: i32,
     pub block_type: u8,
