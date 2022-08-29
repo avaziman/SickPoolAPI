@@ -304,8 +304,8 @@ async fn current_effort_pow(
     let time_now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_millis() as f64 - started;
-    let elapsed_seconds = (time_now - started) / 1000.0;
+        .as_millis();
+    let elapsed_seconds = (time_now  as f64 - started) / 1000.0;
 
     let estimated_seconds = estimated / (total / elapsed_seconds);
 
