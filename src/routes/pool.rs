@@ -314,7 +314,7 @@ async fn current_effort_pow(
             "error": Value::Null,
             "result": {
                 "effort": elapsed_seconds / estimated_seconds,
-                "estimatedAt": time_now as u64 + (estimated_seconds - elapsed_seconds) as u64,
+                "estimatedAt": time_now as i64 + (estimated_seconds - elapsed_seconds) as i64,
                 "start": started as u64
             }
         })
