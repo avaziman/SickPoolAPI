@@ -7,6 +7,8 @@ use redis::{AsyncCommands, FromRedisValue};
 use redis_ts::{
     AsyncTsCommands, TsAggregationType, TsFilterOptions, TsMget, TsMrange, TsOptions, TsRange,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde_json::{json, Value};
 use std::arch::x86_64::_mm_comineq_sd;
 use std::collections::HashMap;
@@ -299,11 +301,16 @@ async fn current_effort_pow(
         }
     };
 
+    let elapsed_seconds = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as f64 - started) / 1000.0;
+
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
             "result": {
-                "effort": total / estimated,
+                "effort": elapsed_seconds / (estimated / (total / elapsed_seconds)),
                 "start": started as u64
             }
         })
