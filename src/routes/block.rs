@@ -38,11 +38,11 @@ pub struct Block {
 impl redis::FromRedisValue for Block {
     fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
         let bytes: Vec<u8> = redis::from_redis_value(&value)?;
-        println!(
-            "bytes {}, size{}",
-            bytes.len(),
-            std::mem::size_of::<BlockRaw>()
-        );
+        // println!(
+        //     "bytes {}, size{}",
+        //     bytes.len(),
+        //     std::mem::size_of::<BlockRaw>()
+        // );
         // if bytes.len() == std::mem::size_of::<BlockRaw>() {
             let block_res = parse_block(&bytes);
 
@@ -86,12 +86,12 @@ fn parse_block(bytes: &Vec<u8>) -> std::result::Result<Block, std::string::FromU
             number: block_raw.number,
             difficulty: block_raw.difficulty,
             effort_percent: block_raw.effort_percent,
-            chain: chain_str,
+            chain: chain_str.trim_matches(char::from(0)).to_string(),
             solver: solver_str,
             worker: worker_str.trim_matches(char::from(0)).to_string(),
             hash: hash_str,
         };
-        println!("BLOCK {:?}", block);
+        // println!("BLOCK {:?}", block);
         // results.push(block);
         return Ok(block);
     }

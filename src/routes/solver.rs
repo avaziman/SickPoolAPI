@@ -1,11 +1,11 @@
 use crate::SickApiData;
 
+use super::table_res::TableRes;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use redis::Commands;
 use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsRange};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use super::table_res::TableRes;
 
 #[derive(Debug, Serialize)]
 pub struct Solver {
@@ -29,11 +29,11 @@ struct BalanceEntry {
 }
 
 pub fn solver_route(cfg: &mut web::ServiceConfig) {
-    cfg.service(overview);
+    cfg.service(solver_overview);
 }
 
 #[get("/overview")]
-async fn overview(
+async fn solver_overview(
     info: web::Query<OverviewQuery>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
@@ -42,9 +42,9 @@ async fn overview(
     // lowercase or id_tag@ to valid address
     let key = info.coin.clone() + ":address-map";
 
-    let field_addr = if info.address.ends_with('@'){
+    let field_addr = if info.address.ends_with('@') {
         info.address.clone()
-    }else {
+    } else {
         info.address.to_lowercase()
     };
 
@@ -58,7 +58,7 @@ async fn overview(
         Err(err) => {
             return HttpResponse::NotFound().body(
                 json!({
-                    "error": "Key not found",
+                    "error": "Couldn't find address",
                     "result": Value::Null
                 })
                 .to_string(),
@@ -68,48 +68,48 @@ async fn overview(
 
     let solver_key = info.coin.clone() + ":solver:" + &address;
 
-    let (immature_balance, mature_balance, identity): (
-        u64,
-        u64,
-        Option<String>,
-    ) = match redis::cmd("HMGET")
-        .arg(&solver_key)
-        .arg("immature-balance")
-        .arg("mature-balance")
-        .arg("identity")
-        .query_async(&mut con)
-        .await
-    {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("Overview redis err: {}", err);
-            return HttpResponse::NotFound().body(
-                json!({
-                    "error": "Failed to get overview",
-                    "result": Value::Null
-                })
-                .to_string(),
-            );
-        }
-    };
+    let (immature_balance, mature_balance, identity): (u64, u64, Option<String>) =
+        match redis::cmd("HMGET")
+            .arg(&solver_key)
+            .arg("immature-balance")
+            .arg("mature-balance")
+            .arg("identity")
+            .query_async(&mut con)
+            .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                eprintln!("Overview redis err: {}", err);
+                return HttpResponse::NotFound().body(
+                    json!({
+                        "error": "Failed to get overview",
+                        "result": Value::Null
+                    })
+                    .to_string(),
+                );
+            }
+        };
 
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
-            "result": {"address": address, "balance": {"mature": mature_balance, "immature": immature_balance}, "identity": identity}
+            "result": {
+                "address": address, 
+                "balance": {"mature": mature_balance, "immature": immature_balance}, 
+                "identity": identity
+            }
         })
         .to_string(),
     )
 }
 
-pub fn miner_id_filter(addr: &String) -> TsFilterOptions{
-    if addr.ends_with('@'){
+pub fn miner_id_filter(addr: &String) -> TsFilterOptions {
+    if addr.ends_with('@') {
         TsFilterOptions::default().equals("identity", addr)
-    }else {
-        TsFilterOptions::default().equals("address", addr)
+    } else {
+        TsFilterOptions::default().equals("address", addr.to_ascii_lowercase())
     }
 }
-
 
 // #[get("/balanceHistory")]
 // async fn balance_history(

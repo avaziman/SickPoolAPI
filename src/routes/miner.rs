@@ -197,7 +197,7 @@ async fn workers(
             );
         }
     };
-    println!("{:?}", tms);
+    // println!("{:?}", tms);
     let worker_count = tms.values.len() / 5;
     let mut res_vec: Vec<WorkerStatsEntry> = Vec::new();
     res_vec.reserve(worker_count);
