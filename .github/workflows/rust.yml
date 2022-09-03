@@ -17,6 +17,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Build
-      run: cargo build --verbose
+      run: /home/pool/.cargo/bin/cargo build --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: /home/pool/.cargo/bin/cargo test --verbose
