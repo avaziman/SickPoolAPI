@@ -54,7 +54,7 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .service(
-                web::scope("")
+                web::scope("/api")
                     .app_data(web::Data::new(SickApiData {
                         redis: con_manager.clone(),
                     }))
@@ -63,9 +63,9 @@ async fn main() -> std::io::Result<()> {
                     .service(web::scope("/solver").configure(solver::solver_route)),
             )
             .wrap(cors)
-        // .wrap(middleware::Logger::default())
+        .wrap(middleware::Logger::default())
     })
-    .bind(("127.0.0.1", 2222))?
+    .bind(("0.0.0.0", 2222))?
     .run()
     .await
 }
