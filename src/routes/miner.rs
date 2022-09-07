@@ -205,6 +205,11 @@ async fn workers(
     // timeserieses are sorted by alphabetical order
     for i in 0..worker_count {
         let worker_vec: Vec<&str> = tms.values[i * 5].key.split('.').collect();
+        if tms.values[i].value.is_none() {
+            // the worker hasn't gotten any statistics yet
+            continue
+        };
+
         res_vec.push(WorkerStatsEntry {
             worker: String::from(worker_vec[1]),
             stats: HashrateEntry {
