@@ -305,7 +305,7 @@ async fn current_effort_pow(
         json!({
             "error": Value::Null,
             "result": {
-                "effort": total / estimated * 100.0,
+                "effortPercent": total / estimated * 100.0,
                 // "estimatedAt": time_now as f64 + (estimated_seconds - elapsed_seconds),
                 "start": started as u64
             }
