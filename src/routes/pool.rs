@@ -301,19 +301,11 @@ async fn current_effort_pow(
         }
     };
 
-    let time_now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let elapsed_seconds = (time_now  as f64 - started) / 1000.0;
-
-    let estimated_seconds = estimated / (total / elapsed_seconds);
-
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
             "result": {
-                "effort": elapsed_seconds / estimated_seconds,
+                "effort": total / estimated * 100.0,
                 // "estimatedAt": time_now as f64 + (estimated_seconds - elapsed_seconds),
                 "start": started as u64
             }
