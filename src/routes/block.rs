@@ -19,6 +19,8 @@ pub struct BlockRaw {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+
 pub struct Block {
     pub confirmations: i32,
     pub block_type: u8,

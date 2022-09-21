@@ -273,19 +273,12 @@ async fn current_effort_pow(
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let (total, estimated, started): (f64, f64, f64) = match redis::pipe()
-        .hget(
-            format!("{}:{}:pow:round-effort", &info.coin, &info.coin),
-            "$total",
-        )
-        .hget(
-            format!("{}:{}:pow:round-effort", &info.coin, &info.coin),
-            "$estimated",
-        )
-        .hget(
-            format!("{}:{}:pow:round-effort", &info.coin, &info.coin),
-            "$start",
-        )
+    let (total, estimated, started): (f64, f64, f64) = match 
+        redis::cmd("HMGET")
+            .arg(format!("{}:{}:pow:round-effort", &info.coin, &info.coin))
+            .arg("$total")
+            .arg("$estimated")
+            .arg("$start")
         .query_async(&mut con)
         .await
     {
