@@ -8,8 +8,22 @@ edition = "2021"
 [dependencies]
 actix-web = "4"
 actix-cors = "0.6.1"
-redis = {version = "0.21.5", features = ["tokio-comp", "connection-manager"]}
-redis_ts = { version = "0.4.1", features = ['tokio-comp'] }
+redis = {version = "0.22.1", features = ["tokio-comp", "connection-manager"]}
+# redis_ts = { version = "0.4.1", features = ['tokio-comp'] }
+redis_ts = { git="https://github.com/ISickMan/redis_ts/", branch="empty_buckettimestamp", features = ['tokio-comp'] }
 env_logger = "0.9.0"
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.59"
+serde_repr = "0.1"
+
+cxx = "1.0"
+hex = "0.4"
+
+#chartgen = { git = "https://github.com/ItsSickGuy/ChartGen" }
+# sickpool = {git = "https://github.com/ItsSickGuy/SickPool"}
+
+#[patch]
+chartgen = { path = "/home/sickguy/.cargo/git/checkouts/chartgen-28545a3ad2ef82cf/7c2e54f/" }
+
+[build-dependencies]
+cxx-build = "1.0"

@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 use actix_web::{get, web, App, HttpServer, Responder, middleware};
 extern crate redis;
 // use redis::Commands;
@@ -10,6 +14,10 @@ use routes::solver;
 
 mod api_data;
 use api_data::SickApiData;
+
+mod redis_interop;
+use redis_interop::ffi;
+
 
 mod pool_events;
 use pool_events::listen_redis;
@@ -29,6 +37,7 @@ async fn greet(name: web::Path<String>) -> impl Responder {
 //     pub field_type: FieldType,
 //     pub sortable: bool,
 // }
+
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -63,7 +72,7 @@ async fn main() -> std::io::Result<()> {
                     .service(web::scope("/solver").configure(solver::solver_route)),
             )
             .wrap(cors)
-        .wrap(middleware::Logger::default())
+        // .wrap(middleware::Logger::default())
     })
     .bind(("0.0.0.0", 2222))?
     .run()

@@ -2,7 +2,8 @@ use crate::SickApiData;
 
 use super::solver::OverviewQuery;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
-use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsMrange, TsRange};
+use redis::aio::ConnectionManager;
+use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsMrange, TsRange, TsAggregationOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use crate::solver::miner_id_filter;
@@ -54,7 +55,7 @@ async fn stats_history(
             .equals("prefix", "miner")
             .equals("type", ts_type);
 
-    let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None, filter).await {
+    let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None::<TsAggregationOptions>, filter).await {
         Ok(res) => res,
         Err(err) => {
             eprintln!("range query error: {}", err);
@@ -118,7 +119,7 @@ async fn worker_history(
         miner_id_filter(&info.address)
             .equals("type", ts_type);
 
-    let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None, filter).await {
+    let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None::<TsAggregationOptions>, filter).await {
         Ok(res) => res,
         Err(err) => {
             eprintln!("range query error: {}", err);

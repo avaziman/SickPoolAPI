@@ -1,12 +1,14 @@
 use crate::SickApiData;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 extern crate redis;
+use std::fmt;
+
+use crate::redis_interop::ffi;
 
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, FromRedisValue};
-use redis_ts::{
-    AsyncTsCommands, TsAggregationType, TsFilterOptions, TsMget, TsMrange, TsOptions, TsRange,
-};
+use redis_ts::{AsyncTsCommands, TsFilterOptions, TsRange, TsMrange, TsAggregationType, TsAggregationOptions, TsBucketTimestamp}; //TsAggregationOptions, TsBucketTimestamp
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -42,27 +44,194 @@ struct TableQuery {
     limit: u8,
 }
 
+async fn get_mini_chart(con: &mut ConnectionManager, key: &String) -> HttpResponse {
+    let svg_key = key_format(&[&key, "SVG"]);
+    let svg_res: Option<String> = match con.get(&svg_key).await {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::InternalServerError().body("no")
+        }
+    };
+
+
+    // match make_mini_chart(con, key).await {
+    //         // if the key doesn't exist, it's time to update chart, regenerate
+    //         Some(r) => 
+    //         {
+    //                 // save new svg
+    //             let save_res: () = 
+    //             {
+    //                 Ok(r) => r,
+    //                 Err(e) => {
+    //                     eprintln!("Failed to save new chart svg key: {}, error: {}", &svg_key, e);
+    //                     ()
+    //                 }
+    //             };
+    //             r
+    //         },
+    //         None => {
+    //             return HttpResponse::InternalServerError().body("no");
+    //         }
+
+    let svg_raw: String = match svg_res {
+        Some(res) => res,
+        None => {
+            let points = get_chart_points(con, key).await;
+
+            if points.len() < 2 { return HttpResponse::InternalServerError().body("no"); }
+
+            let mini_chart = make_mini_chart(&points).await;
+
+            let last_interval = (points[points.len() - 1].x - points[points.len() - 2].x) as usize;
+            let save_res : String = match con.set_ex(&svg_key, &mini_chart, last_interval).await {
+                Ok(e) => { e},
+                Err(e) => { String::from("error") }
+            };
+
+            mini_chart
+        },
+    };
+
+    HttpResponse::Ok()
+        .append_header(("Content-Type", "image/svg+xml"))
+        .body(svg_raw)
+}
+
+// #[derive(Copy)]
+struct MiniChart {
+    svg: Option<String>,
+    interval_ms: u64,
+}
+
+static HASHRATE_POOL: &str = ":HASHRATE:POOL";
+static HASHRATE_NETWORK: &str = ":HASHRATE:NETWORK";
+static MINER_COUNT_POOL: &str = ":MINER_COUNT:POOL";
+static WORKER_COUNT_POOL: &str = ":WORKER_COUNT:POOL";
+static DIFFICULTY: &str = ":DIFFICULTY";
+static BLOCKS_MINED: &str = ":BLOCK:STATS:NUMBER";
+static BLOCK_EFFORT: &str = ":BLOCK:STATS:EFFORT_PERCENT";
+
+pub async fn get_chart_points(con: &mut ConnectionManager, key: &String) -> Vec<chartgen::Point<f64>>
+{
+    let tms: TsRange<u64, f64> = match con.ts_range(key, 0, "+", None::<usize>,  Some(
+            TsAggregationOptions::new(TsAggregationType::Avg(5000))
+                .empty(true)
+                .bucket_timestamp(Some(TsBucketTimestamp::Mid))
+       )).await {
+        Ok(res) => res,
+        Err(err) => {
+            eprintln!("range query error: {}", err);
+            return Vec::<chartgen::Point<f64>>::new();
+        }
+    };
+
+    let mut res: Vec<chartgen::Point<f64>> = Vec::new();
+    res.reserve(tms.values.len());
+
+    for i in tms.values.iter() {
+        res.push(chartgen::Point {
+            x: i.0 as f64,
+            y: i.1,
+        });
+    }
+
+    res
+}
+
+pub async fn make_mini_chart(points: &Vec<chartgen::Point<f64>>) -> String {
+    let chart_size: chartgen::Point<f64> = chartgen::Point { x: 150.0, y: 100.0 };
+    let stroke_width = String::from("1.5");
+    let color = String::from("red");
+
+
+    let truncated = chartgen::truncate_chart(&points, chart_size);
+
+    chartgen::generate_svg(
+        &truncated,
+        chart_size,
+        color.clone(),
+        stroke_width.clone(),
+    )
+}
+
 pub fn pool_route(cfg: &mut web::ServiceConfig) {
     cfg.service(pool_overview);
+    cfg.service(hashrate_history);
     cfg.service(staking_balance);
     cfg.service(block_number);
     cfg.service(current_effort_pow);
     cfg.service(blocks);
     cfg.service(payouts);
     cfg.service(solvers);
-    cfg.service(hashrate_history);
+    cfg.service(charts_hashrate_history);
 }
 
-#[get("/hashrateHistory")]
+// #[get("/charts/hashrateHistory.svg")]
+#[get("/charts/{chart_name}.svg")]
+async fn charts_hashrate_history(
+    api_data: web::Data<SickApiData>,
+    info: web::Query<CoinQuery>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let mut con = api_data.redis.clone();
+    let chart_name = path.into_inner();
+    let coin = info.coin.clone();
+
+    let map: HashMap<&str, &str> = HashMap::from([
+        ("hashrateHistory", HASHRATE_POOL),
+        ("networkHashrateHistory", HASHRATE_NETWORK),
+        ("minerCountHistory", MINER_COUNT_POOL),
+        ("workerCountHistory", WORKER_COUNT_POOL),
+        ("difficultyHistory", DIFFICULTY),
+        ("blockCountHistory", BLOCKS_MINED),
+        ("blockEffortHistory", BLOCK_EFFORT),
+    ]);
+
+    match map.get(&chart_name[..]) {
+        Some(key_type) => {
+            let key = key_format(&[&coin, *key_type, "COMPACT"]);
+            get_mini_chart(&mut con, &key).await
+        }
+        None => HttpResponse::NotFound().body("no such chart")
+    }
+}
+
+#[get("/{key}History")]
 async fn hashrate_history(
     api_data: web::Data<SickApiData>,
     info: web::Query<CoinQuery>,
+    path: web::Path<String>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let key = info.coin.clone() + ":hashrate:pool";
+    let key_prefix = path.into_inner();
+    let blocks_index = String::from(BLOCKS_MINED) + ":COMPACT";
 
-    let tms: TsRange<u64, f64> = match con.ts_range(key, 0, "+", None::<usize>, None).await {
+    let map: HashMap<&str, &str> = HashMap::from([
+        ("hashrate", HASHRATE_POOL),
+        ("networkHashrate", HASHRATE_NETWORK),
+        ("minerCount", MINER_COUNT_POOL),
+        ("workerCount", WORKER_COUNT_POOL),
+        ("difficulty", DIFFICULTY),
+        ("blockCount", &blocks_index[..]),
+        ("blockEffort", BLOCK_EFFORT),
+    ]);
+
+    let key: String;
+    match map.get(&key_prefix[..]) {
+        Some(index) => {
+            key = info.coin.clone() + index;
+        }
+        None => {
+            return HttpResponse::NotFound().body("no such chart");
+        }
+    };
+
+    history(&mut con, key).await
+}
+
+async fn history(con: &mut ConnectionManager, key: String) -> HttpResponse {
+    let tms: TsRange<u64, f64> = match con.ts_range(key, 0, "+", None::<usize>, None::<TsAggregationType>).await {
         Ok(res) => res,
         Err(err) => {
             eprintln!("range query error: {}", err);
@@ -98,10 +267,11 @@ async fn pool_overview(
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let pool_hashrate_key = format!("{}:hashrate:pool", &info.coin);
-    let net_hashrate_key = format!("{}:{}:network-hashrate", &info.coin, &info.coin);
-    let worker_count_key = info.coin.clone() + ":worker-count:pool";
-    let miner_count_key = info.coin.clone() + ":miner-count:pool";
+    let pool_hashrate_key = format!("{}:HASHRATE:POOL", &info.coin);
+    // add per coin net hashrate
+    let net_hashrate_key = format!("{}:HASHRATE:NETWORK", &info.coin);
+    let worker_count_key = info.coin.clone() + ":WORKER_COUNT:POOL";
+    let miner_count_key = info.coin.clone() + ":MINER_COUNT:POOL";
 
     let ((_, pool_hr), (_, net_hr), (_, minr_cnt), (_, wker_cnt)): (
         (u64, f64),
@@ -134,12 +304,15 @@ async fn pool_overview(
 
     HttpResponse::Ok().body(
         json!(
-        {"error": Value::Null, "result": {
-            "poolHashrate": pool_hr,
-            "networkHashrate": net_hr,
-            "minerCount": minr_cnt,
-            "workerCount": wker_cnt
-        }})
+        {
+            "error": Value::Null,
+            "result": {
+                "poolHashrate": pool_hr,
+                "networkHashrate": net_hr,
+                "minerCount": minr_cnt,
+                "workerCount": wker_cnt
+            }
+        })
         .to_string(),
     )
 }
@@ -219,7 +392,7 @@ async fn staking_balance(req: HttpRequest, api_data: web::Data<SickApiData>) -> 
             "0",
             "+",
             Some(0),
-            None,
+            None::<TsAggregationType>,
             TsFilterOptions::default()
                 .with_labels(true)
                 .equals("type", "balance"),
@@ -273,12 +446,11 @@ async fn current_effort_pow(
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let (total, estimated, started): (f64, f64, f64) = match 
-        redis::cmd("HMGET")
-            .arg(format!("{}:{}:pow:round-effort", &info.coin, &info.coin))
-            .arg("$total")
-            .arg("$estimated")
-            .arg("$start")
+    let (total, estimated, started): (f64, f64, f64) = match redis::cmd("HMGET")
+        .arg(format!("{}:{}:pow:round-effort", &info.coin, &info.coin))
+        .arg("$total")
+        .arg("$estimated")
+        .arg("$start")
         .query_async(&mut con)
         .await
     {
@@ -307,6 +479,23 @@ async fn current_effort_pow(
     )
 }
 
+impl fmt::Display for ffi::Prefix {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+fn key_format<const N: usize>(strs: &[&str; N]) -> String {
+    let mut res: String = String::new();
+    for item in strs.iter() {
+        res += item;
+        res += ":";
+    }
+    res.pop();
+
+    res
+}
+
 #[get("/blocks")]
 async fn blocks(
     info: web::Query<TableQuerySort>,
@@ -314,12 +503,16 @@ async fn blocks(
 ) -> impl Responder {
     // let offset : u32 = info.page * info.limit as u32;
     //TODO: check validity of sortby and sortdir and chains
-
-    let sort_index = info.coin.clone() + ":block-index:" + &info.sortby;
-    // println!("{}", sort_index);
+    use ffi::Prefix;
 
     let mut con = api_data.redis.clone();
-    let block_prefix = info.coin.clone() + ":block:";
+
+    let block_prefix = key_format(&[&info.coin, &Prefix::BLOCK.to_string()]);
+    let sort_index = key_format(&[
+        &block_prefix,
+        &Prefix::INDEX.to_string(),
+        &info.sortby.to_uppercase(),
+    ]);
 
     let mut cmd = redis::cmd("FCALL"); //make read-only
 
@@ -359,13 +552,14 @@ async fn solvers(
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
-    let solver_index_prefix = info.coin.clone() + ":solver-index:" + &info.sortby.clone();
+    let solver_index_prefix =
+        info.coin.clone() + ":SOLVER:INDEX:" + &info.sortby.clone().to_uppercase();
 
     let mut cmd = redis::cmd("FCALL"); // make read-only
     cmd.arg("getsolversbyindex")
         .arg(2)
         .arg(solver_index_prefix)
-        .arg(info.coin.clone() + ":solver:")
+        .arg(info.coin.clone() + ":SOLVER:")
         .arg(info.page * info.limit as u32)
         .arg((info.page + 1) * info.limit as u32 - 1);
 
@@ -422,3 +616,6 @@ impl redis::FromRedisValue for Solver {
         })
     }
 }
+
+
+// round effort and blocks mined 1 day interval, 30d capacity
