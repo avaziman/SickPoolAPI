@@ -18,7 +18,7 @@ use api_data::SickApiData;
 mod redis_interop;
 use redis_interop::ffi;
 
-
+use mysql::Pool;
 mod pool_events;
 use pool_events::listen_redis;
 
@@ -49,8 +49,11 @@ async fn main() -> std::io::Result<()> {
         .get_tokio_connection_manager()
         .await
         .expect("Can't create Redis connection manager");
-
     println!("RedisDB connection successful!");
+
+    println!("Connecting to MySqlDB...");
+    let pool = Pool::new("mysql://root:password@127.0.0.1:3306/ZANO")
+        .expect("Can't connect to MySql DB");
 
     env_logger::init_from_env(Env::default().default_filter_or("info"));
     // allow all origins
@@ -66,6 +69,7 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api")
                     .app_data(web::Data::new(SickApiData {
                         redis: con_manager.clone(),
+                        mysql: pool.clone(),
                     }))
                     .service(web::scope("/pool").configure(pool::pool_route))
                     .service(web::scope("/miner").configure(miner::miner_route))

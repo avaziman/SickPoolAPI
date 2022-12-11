@@ -1,6 +1,8 @@
 use crate::SickApiData;
+use crate::routes::redis::key_format;
 
 use super::table_res::TableRes;
+use crate::redis_interop::ffi::Prefix;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use redis::Commands;
 use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsRange};
@@ -40,7 +42,7 @@ async fn solver_overview(
     let mut con = api_data.redis.clone();
 
     // lowercase or id_tag@ to valid address
-    let key = info.coin.clone() + ":address-map";
+    let key = key_format(&[&info.coin, "ADDRESS_ID_MAP"]);
 
     let field_addr = if info.address.ends_with('@') {
         info.address.clone()
@@ -48,7 +50,7 @@ async fn solver_overview(
         info.address.to_lowercase()
     };
 
-    let address: String = match redis::cmd("HGET")
+    let id: String = match redis::cmd("HGET")
         .arg(key)
         .arg(&field_addr)
         .query_async(&mut con)
@@ -66,14 +68,15 @@ async fn solver_overview(
         }
     };
 
-    let solver_key = info.coin.clone() + ":solver:" + &address;
+    let solver_key = key_format(&[&info.coin, &Prefix::SOLVER.to_string(), &id]);
 
-    let (immature_balance, mature_balance, identity): (u64, u64, Option<String>) =
+    let (address, immature_balance, mature_balance, identity): (String, u64, u64, Option<String>) =
         match redis::cmd("HMGET")
             .arg(&solver_key)
-            .arg("immature-balance")
-            .arg("mature-balance")
-            .arg("identity")
+            .arg(Prefix::ADDRESS.to_string())
+            .arg(Prefix::IMMATURE_BALANCE.to_string())
+            .arg(Prefix::MATURE_BALANCE.to_string())
+            .arg(Prefix::ALIAS.to_string())
             .query_async(&mut con)
             .await
         {
@@ -96,7 +99,7 @@ async fn solver_overview(
             "result": {
                 "address": address, 
                 "balance": {"mature": mature_balance, "immature": immature_balance}, 
-                "identity": identity
+                "alias": identity
             }
         })
         .to_string(),

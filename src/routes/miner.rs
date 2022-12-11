@@ -7,6 +7,8 @@ use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsMrange, TsRange, TsAg
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use crate::solver::miner_id_filter;
+use crate::ffi::Prefix;
+use crate::routes::redis::key_format;
 
 pub fn miner_route(cfg: &mut web::ServiceConfig) {
     cfg.service(stats_history);
@@ -45,14 +47,21 @@ async fn stats_history(
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let ts_type = "(hashrate,\
-                hashrate:average,\
-                shares:valid,\
-                shares:stale,\
-                shares:invalid)";
+    let ts_type = format!(
+                "({},\
+                {},\
+                {},\
+                {},\
+                {})", 
+                 &Prefix::HASHRATE.to_string(),
+                 &key_format(&[&Prefix::HASHRATE.to_string(), &Prefix::AVERAGE.to_string()]),
+                 &key_format(&[&Prefix::SHARES.to_string(), &Prefix::VALID.to_string()]),
+                 &key_format(&[&Prefix::SHARES.to_string(), &Prefix::STALE.to_string()]),
+                 &key_format(&[&Prefix::SHARES.to_string(), &Prefix::INVALID.to_string()])
+                 );
 
-    let filter: TsFilterOptions = miner_id_filter(&info.address)
-            .equals("prefix", "miner")
+    let filter: TsFilterOptions = miner_id_filter(&info.address.to_lowercase())
+            .equals("prefix", Prefix::MINER.to_string())
             .equals("type", ts_type);
 
     let tms: TsMrange<u64, f64> = match con.ts_mrange(0, "+", None::<usize>, None::<TsAggregationOptions>, filter).await {
@@ -72,7 +81,7 @@ async fn stats_history(
     if tms.values.len() != 5 {
         return HttpResponse::NotFound().body(
             json!({
-                "error": "Key not found",
+                "error": "Missing data",
                 "result": Value::Null
             })
             .to_string(),
@@ -174,16 +183,25 @@ async fn workers(
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let keys = "(hashrate,\
-                hashrate:average,\
-                shares:valid,\
-                shares:stale,\
-                shares:invalid)";
+    let ts_type = format!(
+            "({},\
+            {},\
+            {},\
+            {},\
+            {})", 
+                &Prefix::HASHRATE.to_string(),
+                &key_format(&[&Prefix::HASHRATE.to_string(), &Prefix::AVERAGE.to_string()]),
+                &key_format(&[&Prefix::SHARES.to_string(), &Prefix::VALID.to_string()]),
+                &key_format(&[&Prefix::SHARES.to_string(), &Prefix::STALE.to_string()]),
+                &key_format(&[&Prefix::SHARES.to_string(), &Prefix::INVALID.to_string()])
+                );
 
+    // TODO: make selected labels support
     let filter: TsFilterOptions;
         filter = miner_id_filter(&info.address)
-            .equals("prefix", "worker")
-            .equals("type", keys);
+            .equals("prefix", Prefix::WORKER.to_string())
+            .equals("type", ts_type)
+            .with_labels(true);
 
     let tms: TsMget<u64, f64> = match con.ts_mget(filter).await {
         Ok(res) => res,
@@ -205,14 +223,20 @@ async fn workers(
 
     // timeserieses are sorted by alphabetical order
     for i in 0..worker_count {
-        let worker_vec: Vec<&str> = tms.values[i * 5].key.split('.').collect();
+        
+        let worker_name_label: &(String, String) = &tms.values[i * 5].labels[4];
+
         if tms.values[i].value.is_none() {
             // the worker hasn't gotten any statistics yet
             continue
         };
 
+        // if (tms.values[i].value.unwrap().1 < ){
+
+        // }
+
         res_vec.push(WorkerStatsEntry {
-            worker: String::from(worker_vec[1]),
+            worker: worker_name_label.1.clone(),
             stats: HashrateEntry {
                 average_hr: tms.values[i].value.unwrap().1,
                 current_hr: tms.values[i + 1 * worker_count].value.unwrap().1,

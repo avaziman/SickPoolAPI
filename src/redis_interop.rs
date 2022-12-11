@@ -35,6 +35,7 @@ pub mod ffi {
 
         BLOCK,
         MINED_BLOCK,
+        COUNT,
 
         NETWORK,
         POOL,
@@ -69,9 +70,10 @@ pub mod ffi {
     }
 
     #[derive(Debug)]
-    pub enum BlockType {
-        POW = 0b1,
-        PAYMENT = 0b01,
+    pub enum BlockStatus {
+        PENDING = 0,
+        CONFIRMED = 1,
+        ORPHANED = 2,
     }
 
     //#[repr(C)] // don't modify order

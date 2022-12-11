@@ -4,10 +4,14 @@ extern crate redis;
 use std::fmt;
 
 use crate::redis_interop::ffi;
+use crate::routes::redis::key_format;
 
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, FromRedisValue};
-use redis_ts::{AsyncTsCommands, TsFilterOptions, TsRange, TsMrange, TsAggregationType, TsAggregationOptions, TsBucketTimestamp}; //TsAggregationOptions, TsBucketTimestamp
+use redis_ts::{
+    AsyncTsCommands, TsAggregationOptions, TsAggregationType, TsBucketTimestamp, TsFilterOptions,
+    TsMrange, TsRange,
+}; //TsAggregationOptions, TsBucketTimestamp
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +23,7 @@ use super::block::Block;
 use super::payout::FinishedPayment;
 use super::solver::{solver_overview, Solver};
 use super::table_res::TableRes;
+use ffi::Prefix;
 
 // use redisearch_api::{init, Document, FieldType, Index, TagOptions};
 use serde::Deserialize;
@@ -49,47 +54,31 @@ async fn get_mini_chart(con: &mut ConnectionManager, key: &String) -> HttpRespon
     let svg_res: Option<String> = match con.get(&svg_key).await {
         Ok(r) => r,
         Err(e) => {
-            return HttpResponse::InternalServerError().body("no")
+            eprintln!("Get redis error: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to get mini chart");
         }
     };
-
-
-    // match make_mini_chart(con, key).await {
-    //         // if the key doesn't exist, it's time to update chart, regenerate
-    //         Some(r) => 
-    //         {
-    //                 // save new svg
-    //             let save_res: () = 
-    //             {
-    //                 Ok(r) => r,
-    //                 Err(e) => {
-    //                     eprintln!("Failed to save new chart svg key: {}, error: {}", &svg_key, e);
-    //                     ()
-    //                 }
-    //             };
-    //             r
-    //         },
-    //         None => {
-    //             return HttpResponse::InternalServerError().body("no");
-    //         }
 
     let svg_raw: String = match svg_res {
         Some(res) => res,
         None => {
             let points = get_chart_points(con, key).await;
 
-            if points.len() < 2 { return HttpResponse::InternalServerError().body("no"); }
+            // if the key doesn't exist, it's time to update chart, regenerate
+            if points.len() < 2 {
+                return HttpResponse::InternalServerError().body("Not enough data points");
+            }
 
             let mini_chart = make_mini_chart(&points).await;
 
             let last_interval = (points[points.len() - 1].x - points[points.len() - 2].x) as usize;
-            let save_res : String = match con.set_ex(&svg_key, &mini_chart, last_interval).await {
-                Ok(e) => { e},
-                Err(e) => { String::from("error") }
+            let save_res: String = match con.set_ex(&svg_key, &mini_chart, last_interval).await {
+                Ok(e) => e,
+                Err(e) => String::from("error"),
             };
 
             mini_chart
-        },
+        }
     };
 
     HttpResponse::Ok()
@@ -103,32 +92,34 @@ struct MiniChart {
     interval_ms: u64,
 }
 
-static HASHRATE_POOL: &str = ":HASHRATE:POOL";
-static HASHRATE_NETWORK: &str = ":HASHRATE:NETWORK";
-static MINER_COUNT_POOL: &str = ":MINER_COUNT:POOL";
-static WORKER_COUNT_POOL: &str = ":WORKER_COUNT:POOL";
-static DIFFICULTY: &str = ":DIFFICULTY";
-static BLOCKS_MINED: &str = ":BLOCK:STATS:NUMBER";
-static BLOCK_EFFORT: &str = ":BLOCK:STATS:EFFORT_PERCENT";
-
-pub async fn get_chart_points(con: &mut ConnectionManager, key: &String) -> Vec<chartgen::Point<f64>>
-{
-    let tms: TsRange<u64, f64> = match con.ts_range(key, 0, "+", None::<usize>,  Some(
-            TsAggregationOptions::new(TsAggregationType::Avg(5000))
-                .empty(true)
-                .bucket_timestamp(Some(TsBucketTimestamp::Mid))
-       )).await {
+pub async fn get_ts_points(con: &mut ConnectionManager, key: &String) -> Vec<(u64, f64)> {
+    // Some(
+    //         TsAggregationOptions::new(TsAggregationType::Avg(5000))
+    //             .empty(true)
+    //             .bucket_timestamp(Some(TsBucketTimestamp::Mid))
+    //    )
+    let tms: TsRange<u64, f64> = match con
+        .ts_range(key, 0, "+", None::<usize>, None::<TsAggregationOptions>)
+        .await
+    {
         Ok(res) => res,
         Err(err) => {
             eprintln!("range query error: {}", err);
-            return Vec::<chartgen::Point<f64>>::new();
+            return Vec::<(u64, f64)>::new();
         }
     };
+    tms.values
+}
 
+pub async fn get_chart_points(
+    con: &mut ConnectionManager,
+    key: &String,
+) -> Vec<chartgen::Point<f64>> {
+    let raw_points = get_ts_points(con, key).await;
     let mut res: Vec<chartgen::Point<f64>> = Vec::new();
-    res.reserve(tms.values.len());
+    res.reserve(raw_points.len());
 
-    for i in tms.values.iter() {
+    for i in raw_points.iter() {
         res.push(chartgen::Point {
             x: i.0 as f64,
             y: i.1,
@@ -143,15 +134,9 @@ pub async fn make_mini_chart(points: &Vec<chartgen::Point<f64>>) -> String {
     let stroke_width = String::from("1.5");
     let color = String::from("red");
 
-
     let truncated = chartgen::truncate_chart(&points, chart_size);
 
-    chartgen::generate_svg(
-        &truncated,
-        chart_size,
-        color.clone(),
-        stroke_width.clone(),
-    )
+    chartgen::generate_svg(&truncated, chart_size, color.clone(), stroke_width.clone())
 }
 
 pub fn pool_route(cfg: &mut web::ServiceConfig) {
@@ -164,6 +149,7 @@ pub fn pool_route(cfg: &mut web::ServiceConfig) {
     cfg.service(payouts);
     cfg.service(solvers);
     cfg.service(charts_hashrate_history);
+    cfg.service(payout_overview);
 }
 
 // #[get("/charts/hashrateHistory.svg")]
@@ -177,22 +163,72 @@ async fn charts_hashrate_history(
     let chart_name = path.into_inner();
     let coin = info.coin.clone();
 
-    let map: HashMap<&str, &str> = HashMap::from([
-        ("hashrateHistory", HASHRATE_POOL),
-        ("networkHashrateHistory", HASHRATE_NETWORK),
-        ("minerCountHistory", MINER_COUNT_POOL),
-        ("workerCountHistory", WORKER_COUNT_POOL),
-        ("difficultyHistory", DIFFICULTY),
-        ("blockCountHistory", BLOCKS_MINED),
-        ("blockEffortHistory", BLOCK_EFFORT),
+    let map: HashMap<&str, String> = HashMap::from([
+        (
+            "hashrateHistory",
+            key_format(&[
+                &info.coin,
+                &Prefix::HASHRATE.to_string(),
+                &Prefix::POOL.to_string(),
+                &Prefix::COMPACT.to_string(),
+            ]),
+        ),
+        (
+            "networkHashrateHistory",
+            key_format(&[
+                &info.coin,
+                &Prefix::HASHRATE.to_string(),
+                &Prefix::NETWORK.to_string(),
+                &Prefix::COMPACT.to_string(),
+            ]),
+        ),
+        (
+            "minerCountHistory",
+            key_format(&[
+                &info.coin,
+                &Prefix::MINER_COUNT.to_string(),
+                &Prefix::POOL.to_string(),
+                &Prefix::COMPACT.to_string(),
+            ]),
+        ),
+        (
+            "workerCountHistory",
+            key_format(&[
+                &info.coin,
+                &Prefix::WORKER_COUNT.to_string(),
+                &Prefix::POOL.to_string(),
+                &Prefix::COMPACT.to_string(),
+            ]),
+        ),
+        (
+            "difficultyHistory",
+            key_format(&[
+                &info.coin,
+                &Prefix::DIFFICULTY.to_string(),
+                &Prefix::COMPACT.to_string(),
+            ]),
+        ),
+        (
+            "blockCountHistory",
+            key_format(&[
+                &info.coin,
+                &Prefix::MINED_BLOCK.to_string(),
+                &Prefix::COMPACT.to_string(),
+            ]),
+        ),
+        (
+            "blockEffortHistory",
+            key_format(&[
+                &info.coin,
+                &Prefix::BLOCK.to_string(),
+                &Prefix::COMPACT.to_string(),
+            ]),
+        ),
     ]);
 
     match map.get(&chart_name[..]) {
-        Some(key_type) => {
-            let key = key_format(&[&coin, *key_type, "COMPACT"]);
-            get_mini_chart(&mut con, &key).await
-        }
-        None => HttpResponse::NotFound().body("no such chart")
+        Some(key) => get_mini_chart(&mut con, &key).await,
+        None => HttpResponse::NotFound().body("no such chart"),
     }
 }
 
@@ -205,22 +241,58 @@ async fn hashrate_history(
     let mut con = api_data.redis.clone();
 
     let key_prefix = path.into_inner();
-    let blocks_index = String::from(BLOCKS_MINED) + ":COMPACT";
 
-    let map: HashMap<&str, &str> = HashMap::from([
-        ("hashrate", HASHRATE_POOL),
-        ("networkHashrate", HASHRATE_NETWORK),
-        ("minerCount", MINER_COUNT_POOL),
-        ("workerCount", WORKER_COUNT_POOL),
-        ("difficulty", DIFFICULTY),
-        ("blockCount", &blocks_index[..]),
-        ("blockEffort", BLOCK_EFFORT),
+    let map: HashMap<&str, String> = HashMap::from([
+        (
+            "hashrate",
+            key_format(&[
+                &info.coin,
+                &Prefix::HASHRATE.to_string(),
+                &Prefix::POOL.to_string(),
+            ]),
+        ),
+        (
+            "networkHashrate",
+            key_format(&[
+                &info.coin,
+                &Prefix::HASHRATE.to_string(),
+                &Prefix::NETWORK.to_string(),
+            ]),
+        ),
+        (
+            "minerCount",
+            key_format(&[
+                &info.coin,
+                &Prefix::MINER_COUNT.to_string(),
+                &Prefix::POOL.to_string(),
+            ]),
+        ),
+        (
+            "workerCount",
+            key_format(&[
+                &info.coin,
+                &Prefix::WORKER_COUNT.to_string(),
+                &Prefix::POOL.to_string(),
+            ]),
+        ),
+        (
+            "difficulty",
+            key_format(&[&info.coin, &Prefix::DIFFICULTY.to_string()]),
+        ),
+        (
+            "blockCount",
+            key_format(&[&info.coin, &Prefix::MINED_BLOCK.to_string()]),
+        ),
+        (
+            "blockEffort",
+            key_format(&[&info.coin, &Prefix::BLOCK.to_string()]),
+        ),
     ]);
 
-    let key: String;
+    let key: &String;
     match map.get(&key_prefix[..]) {
         Some(index) => {
-            key = info.coin.clone() + index;
+            key = index;
         }
         None => {
             return HttpResponse::NotFound().body("no such chart");
@@ -230,31 +302,18 @@ async fn hashrate_history(
     history(&mut con, key).await
 }
 
-async fn history(con: &mut ConnectionManager, key: String) -> HttpResponse {
-    let tms: TsRange<u64, f64> = match con.ts_range(key, 0, "+", None::<usize>, None::<TsAggregationType>).await {
-        Ok(res) => res,
-        Err(err) => {
-            eprintln!("range query error: {}", err);
-            return HttpResponse::NotFound().body(
-                json!({
-                    "error": "Key not found",
-                    "result": Value::Null
-                })
-                .to_string(),
-            );
-        }
-    };
+async fn history(con: &mut ConnectionManager, key: &String) -> HttpResponse {
+    let mut points = get_ts_points(con, key).await;
 
-    let mut res_vec: Vec<(u64, f64)> = Vec::new();
-    for (i, el) in tms.values.iter().enumerate() {
+    for el in points.iter_mut() {
         // time in unix seconds not ms to save bandwidth
-        res_vec.push((el.0 / 1000, el.1));
+        el.0 /= 1000;
     }
 
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
-            "result": res_vec
+            "result": points
         })
         .to_string(),
     )
@@ -447,10 +506,14 @@ async fn current_effort_pow(
     let mut con = api_data.redis.clone();
 
     let (total, estimated, started): (f64, f64, f64) = match redis::cmd("HMGET")
-        .arg(format!("{}:{}:pow:round-effort", &info.coin, &info.coin))
-        .arg("$total")
-        .arg("$estimated")
-        .arg("$start")
+        .arg(key_format(&[
+            &info.coin,
+            &Prefix::ROUND.to_string(),
+            &Prefix::EFFORT.to_string(),
+        ]))
+        .arg(Prefix::TOTAL_EFFORT.to_string())
+        .arg(Prefix::ESTIMATED_EFFORT.to_string())
+        .arg(Prefix::START_TIME.to_string())
         .query_async(&mut con)
         .await
     {
@@ -485,17 +548,6 @@ impl fmt::Display for ffi::Prefix {
     }
 }
 
-fn key_format<const N: usize>(strs: &[&str; N]) -> String {
-    let mut res: String = String::new();
-    for item in strs.iter() {
-        res += item;
-        res += ":";
-    }
-    res.pop();
-
-    res
-}
-
 #[get("/blocks")]
 async fn blocks(
     info: web::Query<TableQuerySort>,
@@ -527,7 +579,40 @@ async fn blocks(
         cmd.arg("REV");
     }
 
-    return cmd_res::<TableRes<Block>>(&mut con, &cmd).await;
+    let mut table_res: TableRes<Block> = cmd.query_async(&mut con).await.`unwrap();
+    let mut addresses_pipe = redis::pipe();
+    for i in table_res.entries.iter_mut() {
+        let key = key_format(&[
+            &info.coin,
+            &Prefix::SOLVER.to_string(),
+            &format!("{:08x}", i.raw.miner_id),
+        ]);
+        addresses_pipe
+            .cmd("HGET")
+            .arg(key)
+            .arg(Prefix::ADDRESS.to_string());
+    }
+    let addresses: Vec<String> = match addresses_pipe.query_async(&mut con).await {
+        Ok(r) => r,
+        Err(e) => {
+            return redis_error();
+        }
+    };
+    let mut addr_iter = addresses.iter();
+    for b in table_res.entries.iter_mut() {
+        b.solver = addr_iter.next().unwrap().clone();
+    }
+
+    return HttpResponse::Ok().body(json!({"result": table_res, "error": Value::Null}).to_string());
+}
+
+fn redis_error() -> HttpResponse {
+    HttpResponse::InternalServerError().body(
+        json!(
+            {"error": "Database error", "result": Value::Null}
+        )
+        .to_string(),
+    )
 }
 
 #[get("/payouts")]
@@ -570,6 +655,24 @@ async fn solvers(
     return cmd_res::<TableRes<Solver>>(&mut con, &cmd).await;
 }
 
+#[get("/payoutOverview")]
+async fn payout_overview(
+    info: web::Query<CoinQuery>,
+    api_data: web::Data<SickApiData>,
+) -> impl Responder {
+    // let mut con = api_data.redis.clone();
+    
+    HttpResponse::Ok().body(json!({
+        "error": Value::Null,
+        "scheme": "PPLNS",
+        "fee": 0.01,
+        "next_payout": 12340000,
+        "minimum_threshold": 1,
+        "total_paid": 1,
+        "total_payouts": 1,
+    }).to_string())
+}
+
 pub async fn cmd_res<T: serde::Serialize + FromRedisValue>(
     con: &mut ConnectionManager,
     cmd: &redis::Cmd,
@@ -578,12 +681,7 @@ pub async fn cmd_res<T: serde::Serialize + FromRedisValue>(
         Ok(res) => res,
         Err(e) => {
             eprintln!("Database error: {}", e);
-            return HttpResponse::InternalServerError().body(
-                json!(
-                    {"error": "Database error", "result": Value::Null}
-                )
-                .to_string(),
-            );
+            return redis_error();
         }
     };
 
@@ -616,6 +714,5 @@ impl redis::FromRedisValue for Solver {
         })
     }
 }
-
 
 // round effort and blocks mined 1 day interval, 30d capacity
