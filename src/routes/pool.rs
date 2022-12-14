@@ -3,7 +3,7 @@ use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 extern crate redis;
 use std::fmt;
 
-use crate::redis_interop::ffi;
+use crate::redis_interop::ffi::{self, BlockSubmission};
 use crate::routes::redis::key_format;
 
 use redis::aio::ConnectionManager;
@@ -19,11 +19,12 @@ use serde_json::{json, Value};
 use std::arch::x86_64::_mm_comineq_sd;
 use std::collections::HashMap;
 
-use super::block::Block;
 use super::payout::FinishedPayment;
 use super::solver::{solver_overview, Solver};
 use super::table_res::TableRes;
 use ffi::Prefix;
+use mysql::prelude::*;
+use mysql::*;
 
 // use redisearch_api::{init, Document, FieldType, Index, TagOptions};
 use serde::Deserialize;
@@ -505,7 +506,7 @@ async fn current_effort_pow(
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let (total, estimated, started): (f64, f64, f64) = match redis::cmd("HMGET")
+    let (total, estimated, started): (f64, f64, f64) = match redis::cmd("ZSCORE")
         .arg(key_format(&[
             &info.coin,
             &Prefix::ROUND.to_string(),
@@ -553,57 +554,65 @@ async fn blocks(
     info: web::Query<TableQuerySort>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
-    // let offset : u32 = info.page * info.limit as u32;
-    //TODO: check validity of sortby and sortdir and chains
-    use ffi::Prefix;
+    let mut con = api_data.mysql.get_conn().unwrap();
 
-    let mut con = api_data.redis.clone();
-
-    let block_prefix = key_format(&[&info.coin, &Prefix::BLOCK.to_string()]);
-    let sort_index = key_format(&[
-        &block_prefix,
-        &Prefix::INDEX.to_string(),
-        &info.sortby.to_uppercase(),
-    ]);
-
-    let mut cmd = redis::cmd("FCALL"); //make read-only
-
-    cmd.arg("getblocksbyindex")
-        .arg(2)
-        .arg(sort_index)
-        .arg(&block_prefix)
-        .arg(info.page * info.limit as u32) // offset
-        .arg(info.page * info.limit as u32 + info.limit as u32 - 1); // num (limit)
-
-    if info.sortdir == "desc" {
-        cmd.arg("REV");
+    if ((&info.sortdir != "asc" && &info.sortdir != "desc")
+        || (info.sortdir != "id"
+            && info.sortdir != "reward"
+            && info.sortdir != "duration_ms"
+            && info.sortdir != "difficulty"
+            && info.sortdir != "effort_percent"))
+    {
+        HttpResponse::BadRequest().body("invalid sort");
     }
 
-    let mut table_res: TableRes<Block> = cmd.query_async(&mut con).await.`unwrap();
-    let mut addresses_pipe = redis::pipe();
-    for i in table_res.entries.iter_mut() {
-        let key = key_format(&[
-            &info.coin,
-            &Prefix::SOLVER.to_string(),
-            &format!("{:08x}", i.raw.miner_id),
-        ]);
-        addresses_pipe
-            .cmd("HGET")
-            .arg(key)
-            .arg(Prefix::ADDRESS.to_string());
-    }
-    let addresses: Vec<String> = match addresses_pipe.query_async(&mut con).await {
-        Ok(r) => r,
-        Err(e) => {
-            return redis_error();
-        }
+    let query =
+     format!("SELECT blocks.id,status,hash,reward,time_ms,duration_ms,height,difficulty,effort_percent,addresses.address FROM blocks INNER JOIN addresses ON addresses.id = blocks.miner_id ORDER BY {} {} LIMIT {},{}", &info.sortby, &info.sortdir, info.page * info.limit as u32, info.limit);
+
+    let total: i64 = con
+        .query_first("SELECT COUNT(*) FROM blocks")
+        .unwrap()
+        .unwrap();
+
+    let blocks = con
+        .query_map(
+            query,
+            |(
+                id,
+                status,
+                hash_hex,
+                reward,
+                time_ms,
+                duration_ms,
+                height,
+                difficulty,
+                effort_percent,
+                solver,
+            ): (u32, u8, String, u64, u64, u64, u32, f64, f64, String)| {
+                BlockSubmission {
+                    id,
+                    confirmations: 0,
+                    block_type: 0,
+                    chain: 0,
+                    reward,
+                    time_ms,
+                    duration_ms,
+                    height,
+                    difficulty,
+                    effort_percent,
+                    hash_hex,
+                    solver,
+                }
+            },
+        )
+        .unwrap();
+
+    let res = TableRes::<BlockSubmission> {
+        total,
+        entries: blocks,
     };
-    let mut addr_iter = addresses.iter();
-    for b in table_res.entries.iter_mut() {
-        b.solver = addr_iter.next().unwrap().clone();
-    }
 
-    return HttpResponse::Ok().body(json!({"result": table_res, "error": Value::Null}).to_string());
+    return HttpResponse::Ok().body(json!({"result": res, "error": Value::Null}).to_string());
 }
 
 fn redis_error() -> HttpResponse {
@@ -636,23 +645,120 @@ async fn solvers(
     info: web::Query<TableQuerySort>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
-    let mut con = api_data.redis.clone();
+    let mut con_redis = api_data.redis.clone();
+    let mut con_mysql = api_data.mysql.get_conn().unwrap();
+
     let solver_index_prefix =
         info.coin.clone() + ":SOLVER:INDEX:" + &info.sortby.clone().to_uppercase();
 
-    let mut cmd = redis::cmd("FCALL"); // make read-only
-    cmd.arg("getsolversbyindex")
-        .arg(2)
-        .arg(solver_index_prefix)
-        .arg(info.coin.clone() + ":SOLVER:")
-        .arg(info.page * info.limit as u32)
-        .arg((info.page + 1) * info.limit as u32 - 1);
+    let round_effort_key = key_format(&[
+        &info.coin,
+        &Prefix::ROUND.to_string(),
+        &Prefix::EFFORT.to_string(),
+    ]);
 
-    if info.sortdir == "desc" {
-        cmd.arg("REV");
+    let hashrate_index = key_format(&[
+        &info.coin,
+        &Prefix::SOLVER.to_string(),
+        &Prefix::INDEX.to_string(),
+        &Prefix::HASHRATE.to_string(),
+    ]);
+
+    let mut ids: Option<Vec<u32>> = None;
+
+    if info.sortby == "round-effort" {
+        // miner id -> effort
+        ids = zrange_table(&mut con_redis, &round_effort_key, &info).await;
+    } else if info.sortby == "hashrate" {
+        ids = zrange_table(&mut con_redis, &hashrate_index, &info).await;
     }
 
-    return cmd_res::<TableRes<Solver>>(&mut con, &cmd).await;
+    let ids = match ids {
+        Some(r) => r,
+        None => {
+            return redis_error();
+        }
+    };
+
+    let round_info_key = key_format(&[&info.coin, &Prefix::ROUND.to_string(), &Prefix::INFO.to_string()]);
+    let total_effort : f64 = con_redis.hget(round_info_key, Prefix::TOTAL_EFFORT.to_string()).await.unwrap();
+
+    // HANDLE
+    let hashrates: Vec<Option<f64>> = zscore_ids(&mut con_redis, &hashrate_index, &ids)
+        .await
+        .unwrap();
+    let efforts: Vec<Option<f64>> = zscore_ids(&mut con_redis, &round_effort_key, &ids)
+        .await
+        .unwrap();
+
+    let mut miners: Vec<Solver> = Vec::new();
+    miners.reserve(ids.len());
+    
+    let stmt = con_mysql.prep("SELECT addresses.address,join_time FROM miners INNER JOIN addresses ON miners.address_id = addresses.id WHERE address_id = ?").unwrap();
+    
+    for (i, id) in ids.iter().enumerate() {
+        let (addr, join_time) : (String, u64) = con_mysql.exec_first(&stmt, (id,)).unwrap().unwrap();
+        
+        miners.push(Solver {
+            id: *id,
+            address: addr,
+            hashrate: match hashrates[i] {
+                Some(r) => r,
+                None => 0.0,
+            },
+            round_effort: match efforts[i] {
+                Some(r) => r / total_effort,
+                None => 0.0,
+            },
+            balance: 0,
+            joined: join_time,
+        });
+    }
+
+
+    let res = TableRes::<Solver> {
+        total: 0,
+        entries: miners,
+    };
+
+    return HttpResponse::Ok().body(json!({"result": res, "error": Value::Null}).to_string());
+}
+
+async fn zrange_table(
+    con: &mut ConnectionManager,
+    key: &String,
+    query: &web::Query<TableQuerySort>,
+) -> Option<Vec<u32>> {
+    match redis::cmd("ZRANGE")
+        .arg(key)
+        .arg(query.page * query.limit as u32)
+        .arg((query.page + 1) * query.limit as u32)
+        .query_async(con)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{}", e);
+            None
+        }
+    }
+}
+
+async fn zscore_ids(
+    con: &mut ConnectionManager,
+    key: &String,
+    ids: &Vec<u32>,
+) -> Option<Vec<Option<f64>>> {
+    let mut pipe = redis::pipe();
+    for id in ids.iter() {
+        pipe.cmd("ZSCORE").arg(key).arg(id);
+    }
+
+    let res: Option<Vec<Option<f64>>> = match pipe.query_async(con).await {
+        Ok(r) => r,
+        Err(e) => None,
+    };
+    res
 }
 
 #[get("/payoutOverview")]
@@ -661,16 +767,19 @@ async fn payout_overview(
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     // let mut con = api_data.redis.clone();
-    
-    HttpResponse::Ok().body(json!({
-        "error": Value::Null,
-        "scheme": "PPLNS",
-        "fee": 0.01,
-        "next_payout": 12340000,
-        "minimum_threshold": 1,
-        "total_paid": 1,
-        "total_payouts": 1,
-    }).to_string())
+
+    HttpResponse::Ok().body(
+        json!({
+            "error": Value::Null,
+            "scheme": "PPLNS",
+            "fee": 0.01,
+            "next_payout": 12340000,
+            "minimum_threshold": 1,
+            "total_paid": 1,
+            "total_payouts": 1,
+        })
+        .to_string(),
+    )
 }
 
 pub async fn cmd_res<T: serde::Serialize + FromRedisValue>(
@@ -693,26 +802,26 @@ pub async fn cmd_res<T: serde::Serialize + FromRedisValue>(
     return HttpResponse::Ok().body(json_res);
 }
 
-impl redis::FromRedisValue for Solver {
-    fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
-        let vec: Vec<String> = redis::from_redis_value(value)?;
+// impl redis::FromRedisValue for Solver {
+//     fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
+//         let vec: Vec<String> = redis::from_redis_value(value)?;
 
-        if vec.len() != 5 {
-            return Err(redis::RedisError::from((
-                redis::ErrorKind::TypeError,
-                "Failed to parse solver",
-                format!("Failed to parse solver {:?}", value),
-            )));
-        };
+//         if vec.len() != 5 {
+//             return Err(redis::RedisError::from((
+//                 redis::ErrorKind::TypeError,
+//                 "Failed to parse solver",
+//                 format!("Failed to parse solver {:?}", value),
+//             )));
+//         };
 
-        Ok(Solver {
-            address: vec[0].clone(),
-            hashrate: vec[1].parse().unwrap_or(0f64),
-            balance: vec[2].parse().unwrap_or(0f64),
-            joined: vec[3].parse().unwrap(), // don't handle
-            worker_count: vec[4].parse().unwrap_or(0),
-        })
-    }
-}
+//         Ok(Solver {
+//             address: vec[0].clone(),
+//             hashrate: vec[1].parse().unwrap_or(0f64),
+//             balance: vec[2].parse().unwrap_or(0f64),
+//             joined: vec[3].parse().unwrap(), // don't handle
+//             // worker_count: vec[4].parse().unwrap_or(0),
+//         })
+//     }
+// }
 
 // round effort and blocks mined 1 day interval, 30d capacity

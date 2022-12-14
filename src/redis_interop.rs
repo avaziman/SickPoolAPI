@@ -29,6 +29,7 @@ pub mod ffi {
         MATURE,
         IMMATURE,
         REWARD,
+        INFO,
 
         HASHRATE,
         SHARES,
@@ -80,6 +81,7 @@ pub mod ffi {
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct BlockSubmission {
+        pub id: u32,
         pub confirmations: i32,
         pub block_type: u8,
         pub chain: u8,
@@ -87,16 +89,12 @@ pub mod ffi {
         pub time_ms: u64,
         pub duration_ms: u64,
         pub height: u32,
-        pub number: u32,
         pub difficulty: f64,
         pub effort_percent: f64,
 
-        #[serde(skip_serializing)]
-        pub miner_id: u32,
-        #[serde(skip_serializing)]
-        pub worker_id: u32,
-        #[serde(skip_serializing)]
-        pub hash_bin: [u8; 32],
+        #[serde(alias = "hash")]
+        pub hash_hex: String,
+        pub solver: String,
     }
 }
 

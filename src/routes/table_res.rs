@@ -2,7 +2,7 @@ extern crate redis;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-pub struct TableRes<T: redis::FromRedisValue> {
+pub struct TableRes<T> {
     pub total: i64,
     pub entries: Vec<T>,
 }
