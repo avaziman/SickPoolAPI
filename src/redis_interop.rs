@@ -29,7 +29,6 @@ pub mod ffi {
         MATURE,
         IMMATURE,
         REWARD,
-        INFO,
 
         HASHRATE,
         SHARES,
@@ -68,6 +67,7 @@ pub mod ffi {
         ACTIVE_IDS,
         STATS,
         COMPACT,
+        HEIGHT,
     }
 
     #[derive(Debug)]
@@ -92,7 +92,7 @@ pub mod ffi {
         pub difficulty: f64,
         pub effort_percent: f64,
 
-        #[serde(alias = "hash")]
+        #[serde(rename(serialize = "hash"))]
         pub hash_hex: String,
         pub solver: String,
     }

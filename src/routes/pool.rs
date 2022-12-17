@@ -1,24 +1,24 @@
-use crate::SickApiData;
+use crate::api_data::{CoinQuery, SickApiData};
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 extern crate redis;
 use std::fmt;
 
 use crate::redis_interop::ffi::{self, BlockSubmission};
-use crate::routes::redis::key_format;
+use crate::routes::redis::{key_format, get_ts_points};
 
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, FromRedisValue};
 use redis_ts::{
     AsyncTsCommands, TsAggregationOptions, TsAggregationType, TsBucketTimestamp, TsFilterOptions,
     TsMrange, TsRange,
-}; //TsAggregationOptions, TsBucketTimestamp
+};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use std::arch::x86_64::_mm_comineq_sd;
 use std::collections::HashMap;
 
+use super::history;
 use super::payout::FinishedPayment;
 use super::solver::{solver_overview, Solver};
 use super::table_res::TableRes;
@@ -28,11 +28,6 @@ use mysql::*;
 
 // use redisearch_api::{init, Document, FieldType, Index, TagOptions};
 use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct CoinQuery {
-    coin: String,
-}
 
 #[derive(Deserialize)]
 struct TableQuerySort {
@@ -50,42 +45,54 @@ struct TableQuery {
     limit: u8,
 }
 
-async fn get_mini_chart(con: &mut ConnectionManager, key: &String) -> HttpResponse {
-    let svg_key = key_format(&[&key, "SVG"]);
-    let svg_res: Option<String> = match con.get(&svg_key).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Get redis error: {}", e);
-            return HttpResponse::InternalServerError().body("Failed to get mini chart");
-        }
-    };
-
-    let svg_raw: String = match svg_res {
-        Some(res) => res,
-        None => {
-            let points = get_chart_points(con, key).await;
-
-            // if the key doesn't exist, it's time to update chart, regenerate
-            if points.len() < 2 {
-                return HttpResponse::InternalServerError().body("Not enough data points");
-            }
-
-            let mini_chart = make_mini_chart(&points).await;
-
-            let last_interval = (points[points.len() - 1].x - points[points.len() - 2].x) as usize;
-            let save_res: String = match con.set_ex(&svg_key, &mini_chart, last_interval).await {
-                Ok(e) => e,
-                Err(e) => String::from("error"),
-            };
-
-            mini_chart
-        }
-    };
-
-    HttpResponse::Ok()
-        .append_header(("Content-Type", "image/svg+xml"))
-        .body(svg_raw)
+pub fn pool_route(cfg: &mut web::ServiceConfig) {
+    cfg.service(pool_overview);
+    cfg.service(block_number);
+    cfg.service(block_overview);
+    cfg.service(blocks);
+    cfg.service(payouts);
+    cfg.service(solvers);
+    // cfg.service(charts_hashrate_history);
+    cfg.service(payout_overview);
+    cfg.service(web::scope("/history").configure(history::pool_history_route));
 }
+
+// async fn get_mini_chart(con: &mut ConnectionManager, key: &String) -> HttpResponse {
+//     let svg_key = key_format(&[&key, "SVG"]);
+//     let svg_res: Option<String> = match con.get(&svg_key).await {
+//         Ok(r) => r,
+//         Err(e) => {
+//             eprintln!("Get redis error: {}", e);
+//             return HttpResponse::InternalServerError().body("Failed to get mini chart");
+//         }
+//     };
+
+//     let svg_raw: String = match svg_res {
+//         Some(res) => res,
+//         None => {
+//             let points = get_chart_points(con, key).await;
+
+//             // if the key doesn't exist, it's time to update chart, regenerate
+//             if points.len() < 2 {
+//                 return HttpResponse::InternalServerError().body("Not enough data points");
+//             }
+
+//             let mini_chart = make_mini_chart(&points).await;
+
+//             let last_interval = (points[points.len() - 1].x - points[points.len() - 2].x) as usize;
+//             let save_res: String = match con.set_ex(&svg_key, &mini_chart, last_interval).await {
+//                 Ok(e) => e,
+//                 Err(e) => String::from("error"),
+//             };
+
+//             mini_chart
+//         }
+//     };
+
+//     HttpResponse::Ok()
+//         .append_header(("Content-Type", "image/svg+xml"))
+//         .body(svg_raw)
+// }
 
 // #[derive(Copy)]
 struct MiniChart {
@@ -93,30 +100,13 @@ struct MiniChart {
     interval_ms: u64,
 }
 
-pub async fn get_ts_points(con: &mut ConnectionManager, key: &String) -> Vec<(u64, f64)> {
-    // Some(
-    //         TsAggregationOptions::new(TsAggregationType::Avg(5000))
-    //             .empty(true)
-    //             .bucket_timestamp(Some(TsBucketTimestamp::Mid))
-    //    )
-    let tms: TsRange<u64, f64> = match con
-        .ts_range(key, 0, "+", None::<usize>, None::<TsAggregationOptions>)
-        .await
-    {
-        Ok(res) => res,
-        Err(err) => {
-            eprintln!("range query error: {}", err);
-            return Vec::<(u64, f64)>::new();
-        }
-    };
-    tms.values
-}
-
 pub async fn get_chart_points(
     con: &mut ConnectionManager,
     key: &String,
+    interval: u64,
+    retention: u64,
 ) -> Vec<chartgen::Point<f64>> {
-    let raw_points = get_ts_points(con, key).await;
+    let raw_points = get_ts_points(con, key, interval, retention).await;
     let mut res: Vec<chartgen::Point<f64>> = Vec::new();
     res.reserve(raw_points.len());
 
@@ -140,185 +130,157 @@ pub async fn make_mini_chart(points: &Vec<chartgen::Point<f64>>) -> String {
     chartgen::generate_svg(&truncated, chart_size, color.clone(), stroke_width.clone())
 }
 
-pub fn pool_route(cfg: &mut web::ServiceConfig) {
-    cfg.service(pool_overview);
-    cfg.service(hashrate_history);
-    cfg.service(staking_balance);
-    cfg.service(block_number);
-    cfg.service(current_effort_pow);
-    cfg.service(blocks);
-    cfg.service(payouts);
-    cfg.service(solvers);
-    cfg.service(charts_hashrate_history);
-    cfg.service(payout_overview);
-}
-
 // #[get("/charts/hashrateHistory.svg")]
-#[get("/charts/{chart_name}.svg")]
-async fn charts_hashrate_history(
-    api_data: web::Data<SickApiData>,
-    info: web::Query<CoinQuery>,
-    path: web::Path<String>,
-) -> impl Responder {
-    let mut con = api_data.redis.clone();
-    let chart_name = path.into_inner();
-    let coin = info.coin.clone();
+// #[get("/charts/{chart_name}.svg")]
+// async fn charts_hashrate_history(
+//     api_data: web::Data<SickApiData>,
+//     info: web::Query<CoinQuery>,
+//     path: web::Path<String>,
+// ) -> impl Responder {
+//     let mut con = api_data.redis.clone();
+//     let chart_name = path.into_inner();
+//     let coin = info.coin.clone();
 
-    let map: HashMap<&str, String> = HashMap::from([
-        (
-            "hashrateHistory",
-            key_format(&[
-                &info.coin,
-                &Prefix::HASHRATE.to_string(),
-                &Prefix::POOL.to_string(),
-                &Prefix::COMPACT.to_string(),
-            ]),
-        ),
-        (
-            "networkHashrateHistory",
-            key_format(&[
-                &info.coin,
-                &Prefix::HASHRATE.to_string(),
-                &Prefix::NETWORK.to_string(),
-                &Prefix::COMPACT.to_string(),
-            ]),
-        ),
-        (
-            "minerCountHistory",
-            key_format(&[
-                &info.coin,
-                &Prefix::MINER_COUNT.to_string(),
-                &Prefix::POOL.to_string(),
-                &Prefix::COMPACT.to_string(),
-            ]),
-        ),
-        (
-            "workerCountHistory",
-            key_format(&[
-                &info.coin,
-                &Prefix::WORKER_COUNT.to_string(),
-                &Prefix::POOL.to_string(),
-                &Prefix::COMPACT.to_string(),
-            ]),
-        ),
-        (
-            "difficultyHistory",
-            key_format(&[
-                &info.coin,
-                &Prefix::DIFFICULTY.to_string(),
-                &Prefix::COMPACT.to_string(),
-            ]),
-        ),
-        (
-            "blockCountHistory",
-            key_format(&[
-                &info.coin,
-                &Prefix::MINED_BLOCK.to_string(),
-                &Prefix::COMPACT.to_string(),
-            ]),
-        ),
-        (
-            "blockEffortHistory",
-            key_format(&[
-                &info.coin,
-                &Prefix::BLOCK.to_string(),
-                &Prefix::COMPACT.to_string(),
-            ]),
-        ),
-    ]);
+//     let map: HashMap<&str, String> = HashMap::from([
+//         (
+//             "hashrateHistory",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::HASHRATE.to_string(),
+//                 &Prefix::POOL.to_string(),
+//                 &Prefix::COMPACT.to_string(),
+//             ]),
+//         ),
+//         (
+//             "networkHashrateHistory",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::HASHRATE.to_string(),
+//                 &Prefix::NETWORK.to_string(),
+//                 &Prefix::COMPACT.to_string(),
+//             ]),
+//         ),
+//         (
+//             "minerCountHistory",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::MINER_COUNT.to_string(),
+//                 &Prefix::POOL.to_string(),
+//                 &Prefix::COMPACT.to_string(),
+//             ]),
+//         ),
+//         (
+//             "workerCountHistory",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::WORKER_COUNT.to_string(),
+//                 &Prefix::POOL.to_string(),
+//                 &Prefix::COMPACT.to_string(),
+//             ]),
+//         ),
+//         (
+//             "difficultyHistory",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::DIFFICULTY.to_string(),
+//                 &Prefix::COMPACT.to_string(),
+//             ]),
+//         ),
+//         (
+//             "blockCountHistory",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::MINED_BLOCK.to_string(),
+//                 &Prefix::COMPACT.to_string(),
+//             ]),
+//         ),
+//         (
+//             "blockEffortHistory",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::BLOCK.to_string(),
+//                 &Prefix::COMPACT.to_string(),
+//             ]),
+//         ),
+//     ]);
 
-    match map.get(&chart_name[..]) {
-        Some(key) => get_mini_chart(&mut con, &key).await,
-        None => HttpResponse::NotFound().body("no such chart"),
-    }
-}
+//     match map.get(&chart_name[..]) {
+//         Some(key) => get_mini_chart(&mut con, &key).await,
+//         None => HttpResponse::NotFound().body("no such chart"),
+//     }
+// }
 
-#[get("/{key}History")]
-async fn hashrate_history(
-    api_data: web::Data<SickApiData>,
-    info: web::Query<CoinQuery>,
-    path: web::Path<String>,
-) -> impl Responder {
-    let mut con = api_data.redis.clone();
+// #[get("/history/{key}")]
+// async fn hashrate_history(
+//     api_data: web::Data<SickApiData>,
+//     info: web::Query<CoinQuery>,
+//     path: web::Path<String>,
+// ) -> impl Responder {
+//     let mut con = api_data.redis.clone();
 
-    let key_prefix = path.into_inner();
+//     let key_prefix = path.into_inner();
 
-    let map: HashMap<&str, String> = HashMap::from([
-        (
-            "hashrate",
-            key_format(&[
-                &info.coin,
-                &Prefix::HASHRATE.to_string(),
-                &Prefix::POOL.to_string(),
-            ]),
-        ),
-        (
-            "networkHashrate",
-            key_format(&[
-                &info.coin,
-                &Prefix::HASHRATE.to_string(),
-                &Prefix::NETWORK.to_string(),
-            ]),
-        ),
-        (
-            "minerCount",
-            key_format(&[
-                &info.coin,
-                &Prefix::MINER_COUNT.to_string(),
-                &Prefix::POOL.to_string(),
-            ]),
-        ),
-        (
-            "workerCount",
-            key_format(&[
-                &info.coin,
-                &Prefix::WORKER_COUNT.to_string(),
-                &Prefix::POOL.to_string(),
-            ]),
-        ),
-        (
-            "difficulty",
-            key_format(&[&info.coin, &Prefix::DIFFICULTY.to_string()]),
-        ),
-        (
-            "blockCount",
-            key_format(&[&info.coin, &Prefix::MINED_BLOCK.to_string()]),
-        ),
-        (
-            "blockEffort",
-            key_format(&[&info.coin, &Prefix::BLOCK.to_string()]),
-        ),
-    ]);
+//     let map: HashMap<&str, String> = HashMap::from([
+//         (
+//             "hashrate",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::HASHRATE.to_string(),
+//                 &Prefix::POOL.to_string(),
+//             ]),
+//         ),
+//         (
+//             "networkHashrate",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::HASHRATE.to_string(),
+//                 &Prefix::NETWORK.to_string(),
+//             ]),
+//         ),
+//         (
+//             "minerCount",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::MINER_COUNT.to_string(),
+//                 &Prefix::POOL.to_string(),
+//             ]),
+//         ),
+//         (
+//             "workerCount",
+//             key_format(&[
+//                 &info.coin,
+//                 &Prefix::WORKER_COUNT.to_string(),
+//                 &Prefix::POOL.to_string(),
+//             ]),
+//         ),
+//         (
+//             "difficulty",
+//             key_format(&[&info.coin, &Prefix::DIFFICULTY.to_string()]),
+//         ),
+//         (
+//             "blockCount",
+//             key_format(&[&info.coin, &Prefix::MINED_BLOCK.to_string()]),
+//         ),
+//         (
+//             "blockEffort",
+//             key_format(&[&info.coin, &Prefix::BLOCK.to_string()]),
+//         ),
+//         (
+//             "blocksMined",
+//             key_format(&[&info.coin, &Prefix::MINED_BLOCK.to_string(), &Prefix::NUMBER.to_string()]),
+//         ),
+//     ]);
 
-    let key: &String;
-    match map.get(&key_prefix[..]) {
-        Some(index) => {
-            key = index;
-        }
-        None => {
-            return HttpResponse::NotFound().body("no such chart");
-        }
-    };
-
-    history(&mut con, key).await
-}
-
-async fn history(con: &mut ConnectionManager, key: &String) -> HttpResponse {
-    let mut points = get_ts_points(con, key).await;
-
-    for el in points.iter_mut() {
-        // time in unix seconds not ms to save bandwidth
-        el.0 /= 1000;
-    }
-
-    HttpResponse::Ok().body(
-        json!({
-            "error": Value::Null,
-            "result": points
-        })
-        .to_string(),
-    )
-}
+//     let key: &String;
+//     match map.get(&key_prefix[..]) {
+//         Some(index) => {
+//             key = index;
+//         }
+//         None => {
+//             return HttpResponse::NotFound().body("no such chart");
+//         }
+//     };
+// }
 
 #[get("/overview")]
 async fn pool_overview(
@@ -339,13 +301,13 @@ async fn pool_overview(
         (u64, u32),
         (u64, u32),
     ) = match redis::pipe()
-        .cmd("ts.get")
+        .cmd("TS.GET")
         .arg(pool_hashrate_key)
-        .cmd("ts.get")
+        .cmd("TS.GET")
         .arg(net_hashrate_key)
-        .cmd("ts.get")
+        .cmd("TS.GET")
         .arg(miner_count_key)
-        .cmd("ts.get")
+        .cmd("TS.GET")
         .arg(worker_count_key)
         .query_async(&mut con)
         .await
@@ -441,43 +403,6 @@ async fn ts_get_res<T: serde::Serialize + FromRedisValue>(
     HttpResponse::Ok().body(json!({"result": latest.1, "error": Value::Null}).to_string())
 }
 
-#[get("/stakingBalance")]
-async fn staking_balance(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
-    let mut con = api_data.redis.clone();
-    // let dbRes : std::result::Result<redis::Value, redis::RedisError> = redis::cmd("TS.GET").arg("VRSC:worker_count")
-    //             .query_async(&mut con).await;
-    // let dbRes : std::result::Result<u32, redis::RedisError> = redis::cmd("GET").arg("VRSC:1").query_async(&mut con).await;
-    let latest_balances: std::result::Result<TsMrange<u64, f64>, redis::RedisError> = con
-        .ts_mrange(
-            "0",
-            "+",
-            Some(0),
-            None::<TsAggregationType>,
-            TsFilterOptions::default()
-                .with_labels(true)
-                .equals("type", "balance"),
-        )
-        .await;
-
-    match latest_balances {
-        Ok(res) => {
-            let mut sum: f64 = 0.0;
-
-            for entry in res.values.iter() {
-                for values in entry.values.iter() {
-                    sum += values.1 * 10.;
-                }
-            }
-
-            return HttpResponse::Ok().body(sum.to_string());
-        }
-        Err(err) => {
-            eprintln!("err: {}", err);
-            return HttpResponse::InternalServerError().body("Data not found");
-        }
-    }
-}
-
 #[get("/blockNumber")]
 async fn block_number(req: HttpRequest, api_data: web::Data<SickApiData>) -> impl Responder {
     let mut con = api_data.redis.clone();
@@ -498,19 +423,19 @@ async fn block_number(req: HttpRequest, api_data: web::Data<SickApiData>) -> imp
     // return HttpResponse::Ok();
 }
 
-#[get("/roundOverview")]
-async fn current_effort_pow(
+#[get("/blockOverview")]
+async fn block_overview(
     req: HttpRequest,
     info: web::Query<CoinQuery>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
 
-    let (total, estimated, started): (f64, f64, f64) = match redis::cmd("ZSCORE")
+    let (total, estimated, started): (f64, f64, f64) = match redis::cmd("HMGET")
         .arg(key_format(&[
             &info.coin,
             &Prefix::ROUND.to_string(),
-            &Prefix::EFFORT.to_string(),
+            &Prefix::STATS.to_string(),
         ]))
         .arg(Prefix::TOTAL_EFFORT.to_string())
         .arg(Prefix::ESTIMATED_EFFORT.to_string())
@@ -521,12 +446,24 @@ async fn current_effort_pow(
         Ok(r) => r,
         Err(e) => {
             eprintln!("Database error: {}", e);
-            return HttpResponse::InternalServerError().body(
-                json!(
-                    {"error": "Database error", "result": Value::Null}
-                )
-                .to_string(),
-            );
+            return redis_error();
+        }
+    };
+
+    let height: u32 = match con
+        .hget(
+            key_format(&[
+                &info.coin,
+                &Prefix::BLOCK.to_string(),
+                &Prefix::STATS.to_string(),
+            ]),
+            key_format(&[&Prefix::HEIGHT.to_string()]),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return redis_error();
         }
     };
 
@@ -534,9 +471,14 @@ async fn current_effort_pow(
         json!({
             "error": Value::Null,
             "result": {
-                "effortPercent": total / estimated * 100.0,
-                // "estimatedAt": time_now as f64 + (estimated_seconds - elapsed_seconds),
-                "start": started as u64
+                "currentRound": {
+                    "effortPercent": total / estimated * 100.0,
+                    "startTime": started as u64
+                },
+                "height": height,
+                "orphans": 0,
+                "mined": 0,
+                "confirmations": 100
             }
         })
         .to_string(),
@@ -556,12 +498,12 @@ async fn blocks(
 ) -> impl Responder {
     let mut con = api_data.mysql.get_conn().unwrap();
 
-    if ((&info.sortdir != "asc" && &info.sortdir != "desc")
+    if (&info.sortdir != "asc" && &info.sortdir != "desc")
         || (info.sortdir != "id"
             && info.sortdir != "reward"
             && info.sortdir != "duration_ms"
             && info.sortdir != "difficulty"
-            && info.sortdir != "effort_percent"))
+            && info.sortdir != "effort_percent")
     {
         HttpResponse::BadRequest().body("invalid sort");
     }
@@ -680,8 +622,15 @@ async fn solvers(
         }
     };
 
-    let round_info_key = key_format(&[&info.coin, &Prefix::ROUND.to_string(), &Prefix::INFO.to_string()]);
-    let total_effort : f64 = con_redis.hget(round_info_key, Prefix::TOTAL_EFFORT.to_string()).await.unwrap();
+    let round_info_key = key_format(&[
+        &info.coin,
+        &Prefix::ROUND.to_string(),
+        &Prefix::STATS.to_string(),
+    ]);
+    let total_effort: f64 = con_redis
+        .hget(round_info_key, Prefix::TOTAL_EFFORT.to_string())
+        .await
+        .unwrap();
 
     // HANDLE
     let hashrates: Vec<Option<f64>> = zscore_ids(&mut con_redis, &hashrate_index, &ids)
@@ -693,12 +642,12 @@ async fn solvers(
 
     let mut miners: Vec<Solver> = Vec::new();
     miners.reserve(ids.len());
-    
+
     let stmt = con_mysql.prep("SELECT addresses.address,join_time FROM miners INNER JOIN addresses ON miners.address_id = addresses.id WHERE address_id = ?").unwrap();
-    
+
     for (i, id) in ids.iter().enumerate() {
-        let (addr, join_time) : (String, u64) = con_mysql.exec_first(&stmt, (id,)).unwrap().unwrap();
-        
+        let (addr, join_time): (String, u64) = con_mysql.exec_first(&stmt, (id,)).unwrap().unwrap();
+
         miners.push(Solver {
             id: *id,
             address: addr,
@@ -714,7 +663,6 @@ async fn solvers(
             joined: join_time,
         });
     }
-
 
     let res = TableRes::<Solver> {
         total: 0,
