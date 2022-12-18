@@ -25,7 +25,7 @@ pub async fn get_ts_points(
 ) -> Vec<(u64, f64)> {
     let curtime = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
     let last_timestamp = curtime - curtime % interval;
-    let first_timestamp = last_timestamp - retention;
+    let first_timestamp = last_timestamp + interval - retention;
 
     let points_amount: u64 = retention / interval;
 

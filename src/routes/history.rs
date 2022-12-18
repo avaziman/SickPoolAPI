@@ -1,4 +1,4 @@
-use crate::api_data::{CoinQuery, SickApiData, self};
+use crate::api_data::{self, CoinQuery, SickApiData};
 use crate::ffi::Prefix;
 use crate::routes::redis::{get_ts_points, key_format};
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
@@ -42,7 +42,7 @@ fn get_key_name(coin: &String, prefix: &String, pretty_name: &String) -> String 
 #[derive(Clone)]
 pub struct TimeSeriesInterval {
     pub interval: u64,
-    pub retention: u64
+    pub retention: u64,
 }
 
 pub fn network_history_route(cfg: &mut web::ServiceConfig) {
@@ -84,8 +84,31 @@ pub fn pool_history_route(cfg: &mut web::ServiceConfig) {
                     history(
                         &mut app_data.redis.clone(),
                         &key_format(&[&info.coin.clone(), &key_name]),
-                        app_data.hashrate_interval.interval,
-                        app_data.hashrate_interval.retention,
+                        app_data.block_interval.interval,
+                        app_data.block_interval.retention,
+                    )
+                    .await
+                },
+            ),
+        );
+    }
+
+    let arr = [
+        ("blocks-mined", "MINED_BLOCK:NUMBER:COMPACT"),
+        ("round-effort", "MINED_BLOCK:NUMBER"),
+        ("round-duration", "BLOCK:EFFORT_PERCENT:COMPACT"),
+    ];
+
+    for (path, key_name) in arr {
+        cfg.route(
+            &path,
+            web::get().to(
+                move |app_data: web::Data<SickApiData>, info: web::Query<CoinQuery>| async move {
+                    history(
+                        &mut app_data.redis.clone(),
+                        &key_format(&[&info.coin.clone(), &key_name]),
+                        app_data.block_interval.interval,
+                        app_data.block_interval.retention,
                     )
                     .await
                 },

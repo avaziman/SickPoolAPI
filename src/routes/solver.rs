@@ -1,9 +1,11 @@
-use crate::SickApiData;
 use crate::routes::redis::key_format;
+use crate::SickApiData;
 
 use super::table_res::TableRes;
 use crate::redis_interop::ffi::Prefix;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
+use mysql::prelude::*;
+use mysql::*;
 use redis::Commands;
 use redis_ts::{AsyncTsCommands, TsFilterOptions, TsMget, TsRange};
 use serde::{Deserialize, Serialize};
@@ -36,72 +38,45 @@ pub fn solver_route(cfg: &mut web::ServiceConfig) {
     cfg.service(solver_overview);
 }
 
+fn addr_not_found() -> HttpResponse {
+    HttpResponse::NotFound().body(json!({"error": "Address not found!"}).to_string())
+}
+
 #[get("/overview")]
 async fn solver_overview(
     info: web::Query<OverviewQuery>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
+    let mut con_mysql = api_data.mysql.get_conn().unwrap();
 
     // lowercase or id_tag@ to valid address
-    let key = key_format(&[&info.coin, "ADDRESS_ID_MAP"]);
-
-    let field_addr = if info.address.ends_with('@') {
-        info.address.clone()
-    } else {
-        info.address.to_lowercase()
-    };
-
-    let id: String = match redis::cmd("HGET")
-        .arg(key)
-        .arg(&field_addr)
-        .query_async(&mut con)
-        .await
-    {
-        Ok(r) => r,
-        Err(err) => {
-            return HttpResponse::NotFound().body(
-                json!({
-                    "error": "Couldn't find address",
-                    "result": Value::Null
-                })
-                .to_string(),
-            );
-        }
-    };
-
-    let solver_key = key_format(&[&info.coin, &Prefix::SOLVER.to_string(), &id]);
-
-    let (address, immature_balance, mature_balance, identity): (String, u64, u64, Option<String>) =
-        match redis::cmd("HMGET")
-            .arg(&solver_key)
-            .arg(Prefix::ADDRESS.to_string())
-            .arg(Prefix::IMMATURE_BALANCE.to_string())
-            .arg(Prefix::MATURE_BALANCE.to_string())
-            .arg(Prefix::ALIAS.to_string())
-            .query_async(&mut con)
-            .await
-        {
-            Ok(r) => r,
-            Err(err) => {
-                eprintln!("Overview redis err: {}", err);
-                return HttpResponse::NotFound().body(
-                    json!({
-                        "error": "Failed to get overview",
-                        "result": Value::Null
-                    })
-                    .to_string(),
-                );
+    let stmt = con_mysql
+        .prep("SELECT address,alias FROM addresses WHERE address = ? OR alias = ?")
+        .unwrap();
+    let (address, alias): (String, Option<String>) =
+        match con_mysql.exec_first(&stmt, (&info.address, &info.address)) {
+            Ok(res) => match res {
+                Some(re) => re,
+                None => {
+                    return addr_not_found();
+                }
+            },
+            Err(e) => {
+                return addr_not_found();
             }
         };
+
+    let (immature_balance, mature_balance): (u64, u64) = (0, 0);
+
 
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
             "result": {
-                "address": address, 
-                "balance": {"mature": mature_balance, "immature": immature_balance}, 
-                "alias": identity
+                "address": address,
+                "balance": {"mature": mature_balance, "immature": immature_balance},
+                "alias": alias
             }
         })
         .to_string(),

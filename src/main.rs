@@ -26,8 +26,8 @@ use pool_events::listen_redis;
 use std::fs::File;
 use std::io::Read;
 
-use serde_json::json;
 use crate::routes::history::TimeSeriesInterval;
+use serde_json::json;
 
 #[get("/hello/{name}")]
 async fn greet(name: web::Path<String>) -> impl Responder {
@@ -72,22 +72,38 @@ async fn main() -> std::io::Result<()> {
         .get("stats")
         .unwrap()
         .get("hashrate_interval_seconds")
-        .unwrap().as_u64().unwrap();
+        .unwrap()
+        .as_u64()
+        .unwrap();
 
     let hr_retention: u64 = json
         .get("redis")
         .unwrap()
         .get("hashrate_ttl")
-        .unwrap().as_u64().unwrap();
+        .unwrap()
+        .as_u64()
+        .unwrap();
+
+    let block_interval: u64 = json
+        .get("stats")
+        .unwrap()
+        .get("mined_blocks_interval")
+        .unwrap()
+        .as_u64()
+        .unwrap();
 
     println!("Hashrate interval: {}", hr_interval);
     println!("Hashrate ttl: {}", hr_retention);
 
     let hr_timeseries = TimeSeriesInterval {
-            interval: hr_interval,
-            retention: hr_retention,
-        };
+        interval: hr_interval,
+        retention: hr_retention,
+    };
 
+    let block_timeseries = TimeSeriesInterval {
+        interval: block_interval,
+        retention: block_interval * 30,
+    };
     // allow all origins
     std::thread::spawn(move || {
         listen_redis(&client);
@@ -102,7 +118,8 @@ async fn main() -> std::io::Result<()> {
                     .app_data(web::Data::new(SickApiData {
                         redis: con_manager.clone(),
                         mysql: pool.clone(),
-                        hashrate_interval: hr_timeseries.clone()
+                        hashrate_interval: hr_timeseries.clone(),
+                        block_interval: block_timeseries.clone(),
                     }))
                     .service(web::scope("/pool").configure(pool::pool_route))
                     .service(web::scope("/network").configure(network::network_route))

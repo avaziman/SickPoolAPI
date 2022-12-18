@@ -4,7 +4,7 @@ extern crate redis;
 use std::fmt;
 
 use crate::redis_interop::ffi::{self, BlockSubmission};
-use crate::routes::redis::{key_format, get_ts_points};
+use crate::routes::redis::{get_ts_points, key_format};
 
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, FromRedisValue};
@@ -430,6 +430,7 @@ async fn block_overview(
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.redis.clone();
+    let mut mysql_con = api_data.mysql.get_conn().unwrap();
 
     let (total, estimated, started): (f64, f64, f64) = match redis::cmd("HMGET")
         .arg(key_format(&[
@@ -467,6 +468,53 @@ async fn block_overview(
         }
     };
 
+    let curtime = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mined_key = key_format(&[
+        &info.coin,
+        &Prefix::MINED_BLOCK.to_string(),
+        &Prefix::NUMBER.to_string(),
+    ]);
+
+    let mined24h_ts: TsRange<u64, u64> = match con
+        .ts_range(
+            mined_key,
+        (curtime - api_data.block_interval.interval) * 1000,
+            curtime * 1000,
+            Some(1),
+            Some(TsAggregationType::Sum(api_data.block_interval.interval * 1000)),
+        )
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return redis_error();
+        }
+    };
+
+    let mined24h = if mined24h_ts.values.len() > 0 {
+        mined24h_ts.values[0].1
+    } else {
+        0
+    };
+
+        let key = key_format(&[&info.coin, &Prefix::DIFFICULTY.to_string()]);
+    let difficulty : Option<(u64, f64)> = con.ts_get(key).await.unwrap();
+    let difficulty = difficulty.unwrap().1;
+
+    let mined: i64 = mysql_con
+        .query_first("SELECT COUNT(*) FROM blocks")
+        .unwrap()
+        .unwrap();
+
+    let orphaned: i64 = mysql_con
+        .query_first("SELECT COUNT(*) FROM blocks where status=-1")
+        .unwrap()
+        .unwrap();
+
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
@@ -476,8 +524,10 @@ async fn block_overview(
                     "startTime": started as u64
                 },
                 "height": height,
-                "orphans": 0,
-                "mined": 0,
+                "orphans": orphaned,
+                "mined": mined,
+                "mined24h": mined24h,
+                "difficulty": difficulty,
                 "confirmations": 100
             }
         })
