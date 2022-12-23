@@ -10,7 +10,7 @@ use crate::routes::redis::{get_ts_points, key_format};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, FromRedisValue};
 use redis_ts::{
-    AsyncTsCommands, TsAggregationOptions, TsAggregationType, TsBucketTimestamp, TsFilterOptions,
+    AsyncTsCommands, TsAggregationType, TsBucketTimestamp, TsFilterOptions,
     TsMrange, TsRange,
 };
 use std::sync::{Arc, Mutex};
@@ -119,15 +119,15 @@ struct MiniChart {
 //     res
 // }
 
-pub async fn make_mini_chart(points: &Vec<chartgen::Point<f64>>) -> String {
-    let chart_size: chartgen::Point<f64> = chartgen::Point { x: 150.0, y: 100.0 };
-    let stroke_width = String::from("1.5");
-    let color = String::from("red");
+// pub async fn make_mini_chart(points: &Vec<chartgen::Point<f64>>) -> String {
+//     let chart_size: chartgen::Point<f64> = chartgen::Point { x: 150.0, y: 100.0 };
+//     let stroke_width = String::from("1.5");
+//     let color = String::from("red");
 
-    let truncated = chartgen::truncate_chart(&points, chart_size);
+//     let truncated = chartgen::truncate_chart(&points, chart_size);
 
-    chartgen::generate_svg(&truncated, chart_size, color.clone(), stroke_width.clone())
-}
+//     chartgen::generate_svg(&truncated, chart_size, color.clone(), stroke_width.clone())
+// }
 
 // #[get("/charts/hashrateHistory.svg")]
 // #[get("/charts/{chart_name}.svg")]

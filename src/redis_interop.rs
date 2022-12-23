@@ -1,12 +1,9 @@
-use serde::{Serialize, Serializer};
-use serde_repr::*;
 use std::fmt;
 
-#[cxx::bridge]
 pub mod ffi {
 
     #[derive(Debug)]
-    enum Prefix {
+    pub enum Prefix {
         POW,
         ADDRESS,
         ADDRESS_ID_MAP,
@@ -68,8 +65,16 @@ pub mod ffi {
         CONFIRMED = 0b10,
         ORPHANED = 0b100,
         PAID = 0b1000,
-        
-        PENDING_ORPHANED = 0b101
+
+        PENDING_ORPHANED = 0b101,
+    }
+    #[derive(serde::Deserialize)]
+    pub struct StatsConfig {
+        pub hashrate_interval_seconds: u32,
+        pub effort_interval_seconds: u32,
+        pub average_hashrate_interval_seconds: u32,
+        pub mined_blocks_interval: u32,
+        pub diff_adjust_seconds: u32,
     }
 }
 

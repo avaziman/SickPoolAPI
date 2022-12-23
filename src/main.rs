@@ -4,10 +4,11 @@
 #![allow(unused_imports)]
 
 use actix_web::{get, middleware, web, App, HttpServer, Responder};
+use mysql::OptsBuilder;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 extern crate redis;
-// use redis::Commands;
 use env_logger::Env;
+use std::env;
 
 mod routes;
 use routes::miner;
@@ -28,83 +29,60 @@ use pool_events::listen_redis;
 use std::fs::File;
 use std::io::Read;
 
+mod config;
+use config::CoinConfig;
+
 use crate::routes::history::TimeSeriesInterval;
 use serde_json::json;
-
-#[get("/hello/{name}")]
-async fn greet(name: web::Path<String>) -> impl Responder {
-    format!("Hello {name}!")
-}
-
-// pub enum FieldType {
-//     Numeric,
-//     Tag,
-// }
-
-// pub struct IndexField {
-//     pub name: String,
-//     pub field_type: FieldType,
-//     pub sortable: bool,
-// }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Starting SickPool API!");
 
+    let args: Vec<String> = env::args().collect();
+    let config_path = args.get(1).expect("No configuration file path provided.");
+
+    println!("Config file path: {}", config_path);
+
+    let file = File::open(config_path)?;
+
+    let config: CoinConfig = serde_json::from_reader(file).expect("Config file is invalid");
+
+    let host_sep = config.mysql.host.find(":").expect("Invalid mysql host");
+    let mysql_opts = OptsBuilder::new()
+        .ip_or_hostname(Some(&config.mysql.host[0..host_sep]))
+        .tcp_port(config.mysql.host[(host_sep + 1)..].parse::<u16>().unwrap())
+        .user(Some(config.mysql.user))
+        .pass(Some(config.mysql.pass))
+        .db_name(Some(config.mysql.db_name));
+
+    println!("Connecting to MySqlDB...");
+    let pool = Pool::new(mysql_opts).expect("Can't connect to MySql DB");
+
     println!("Connecting to redisDB...");
-    let client = redis::Client::open("redis://127.0.0.1/").expect("Can't create Redis client");
+    let client = redis::Client::open(config.redis.host).expect("Can't create Redis client");
     let con_manager: redis::aio::ConnectionManager = client
         .get_tokio_connection_manager()
         .await
         .expect("Can't create Redis connection manager");
     println!("RedisDB connection successful!");
 
-    println!("Connecting to MySqlDB...");
-    let pool =
-        Pool::new("mysql://root:password@127.0.0.1:3306/ZANO").expect("Can't connect to MySql DB");
-
     env_logger::init_from_env(Env::default().default_filter_or("info"));
 
-    let file =
-        File::open("/home/sickguy/Documents/Projects/SickPool/server/config/coins/ZANOTEST.json")?;
-
-    let json: serde_json::Value = serde_json::from_reader(file).expect("Config file is broken");
-
-    let hr_interval: u64 = json
-        .get("stats")
-        .unwrap()
-        .get("hashrate_interval_seconds")
-        .unwrap()
-        .as_u64()
-        .unwrap();
-
-    let hr_retention: u64 = json
-        .get("redis")
-        .unwrap()
-        .get("hashrate_ttl")
-        .unwrap()
-        .as_u64()
-        .unwrap();
-
-    let block_interval: u64 = json
-        .get("stats")
-        .unwrap()
-        .get("mined_blocks_interval")
-        .unwrap()
-        .as_u64()
-        .unwrap();
-
-    println!("Hashrate interval: {}", hr_interval);
-    println!("Hashrate ttl: {}", hr_retention);
+    println!(
+        "Hashrate interval: {}",
+        config.stats.hashrate_interval_seconds
+    );
+    println!("Hashrate ttl: {}", config.redis.hashrate_ttl_seconds);
 
     let hr_timeseries = TimeSeriesInterval {
-        interval: hr_interval,
-        retention: hr_retention,
+        interval: config.stats.hashrate_interval_seconds as u64,
+        retention: config.redis.hashrate_ttl_seconds as u64,
     };
 
     let block_timeseries = TimeSeriesInterval {
-        interval: block_interval,
-        retention: block_interval * 30,
+        interval: config.stats.mined_blocks_interval as u64,
+        retention: config.stats.mined_blocks_interval as u64 * 30u64,
     };
     // allow all origins
     std::thread::spawn(move || {
@@ -113,13 +91,17 @@ async fn main() -> std::io::Result<()> {
 
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
     builder
-        .set_private_key_file("key.pem", SslFiletype::PEM)
-        .unwrap();
-    builder.set_certificate_chain_file("cert.pem").unwrap();
-
+        .set_private_key_file(
+            "/etc/letsencrypt/live/sickpool.io/privkey.pem",
+            SslFiletype::PEM,
+        )
+        .expect("Failed to find private key file");
+    builder
+        .set_certificate_chain_file("/etc/letsencrypt/live/sickpool.io/fullchain.pem")
+        .expect("Failed to find certificate chain file");
 
     HttpServer::new(move || {
-        let cors = actix_cors::Cors::permissive();
+        let cors = actix_cors::Cors::default().allow_any_origin();
 
         App::new()
             .service(
@@ -139,7 +121,7 @@ async fn main() -> std::io::Result<()> {
         // .wrap(middleware::Logger::default())
     })
     // .bind(("0.0.0.0", 80))?
-    .bind_openssl(("0.0.0.0", 80), builder)?
+    .bind_openssl(("127.0.0.1", 2222), builder)?
     .run()
     .await
 }

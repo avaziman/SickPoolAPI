@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use redis::aio::ConnectionManager;
 use redis_ts::{
-    AsyncTsCommands, TsAggregationOptions, TsAggregationType, TsBucketTimestamp, TsFilterOptions,
+    AsyncTsCommands, TsAggregationType, TsBucketTimestamp, TsFilterOptions,
     TsMrange, TsRange,
 };
 
@@ -37,7 +37,7 @@ pub async fn get_ts_points(
     let (first_timestamp, last_timestamp, points_amount) = get_range_params(interval);
 
     let tms: TsRange<u64, f64> = match con
-        .ts_range(key, first_timestamp * 1000, last_timestamp * 1000, Some(points_amount), None::<TsAggregationOptions>)
+        .ts_range(key, first_timestamp * 1000, last_timestamp * 1000, Some(points_amount), None::<TsAggregationType>)
         .await
     {
         Ok(res) => res,

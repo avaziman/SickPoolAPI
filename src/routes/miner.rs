@@ -8,7 +8,7 @@ use crate::routes::redis::key_format;
 use crate::solver::miner_id_filter;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use redis::aio::ConnectionManager;
-use redis_ts::{AsyncTsCommands, TsAggregationOptions, TsFilterOptions, TsMget, TsMrange, TsRange};
+use redis_ts::{AsyncTsCommands, TsAggregationType, TsFilterOptions, TsMget, TsMrange, TsRange};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -67,7 +67,7 @@ async fn stats_history(
         .equals("type", ts_type);
 
     let tms: TsMrange<u64, f64> = match con
-        .ts_mrange(0, "+", None::<usize>, None::<TsAggregationOptions>, filter)
+        .ts_mrange(0, "+", None::<usize>, None::<TsAggregationType>, filter)
         .await
     {
         Ok(res) => res,
@@ -144,7 +144,7 @@ async fn worker_history(
     let filter: TsFilterOptions = miner_id_filter(&info.address).equals("type", ts_type);
 
     let tms: TsMrange<u64, f64> = match con
-        .ts_mrange(0, "+", None::<usize>, None::<TsAggregationOptions>, filter)
+        .ts_mrange(0, "+", None::<usize>, None::<TsAggregationType>, filter)
         .await
     {
         Ok(res) => res,
