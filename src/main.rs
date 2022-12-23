@@ -1,8 +1,10 @@
+#![crate_type = "bin"]
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
 use actix_web::{get, middleware, web, App, HttpServer, Responder};
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 extern crate redis;
 // use redis::Commands;
 use env_logger::Env;
@@ -109,6 +111,13 @@ async fn main() -> std::io::Result<()> {
         listen_redis(&client);
     });
 
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+    builder
+        .set_private_key_file("key.pem", SslFiletype::PEM)
+        .unwrap();
+    builder.set_certificate_chain_file("cert.pem").unwrap();
+
+
     HttpServer::new(move || {
         let cors = actix_cors::Cors::permissive();
 
@@ -129,7 +138,8 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
         // .wrap(middleware::Logger::default())
     })
-    .bind(("0.0.0.0", 2222))?
+    // .bind(("0.0.0.0", 80))?
+    .bind_openssl(("0.0.0.0", 80), builder)?
     .run()
     .await
 }

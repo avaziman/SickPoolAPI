@@ -6,13 +6,17 @@ use redis::aio::ConnectionManager;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+use super::pool::redis_error;
+
 async fn history(
     con: &mut ConnectionManager,
     key: &String,
-    interval: u64,
-    retention: u64,
+    interval: &TimeSeriesInterval
 ) -> HttpResponse {
-    let points = get_ts_points(con, key, interval, retention).await;
+    let points = match get_ts_points(con, key, interval).await {
+        Some(r)=> r,
+        None => {return redis_error();}
+    };
 
     HttpResponse::Ok().body(
         json!({
@@ -59,8 +63,7 @@ pub fn network_history_route(cfg: &mut web::ServiceConfig) {
                     history(
                         &mut app_data.redis.clone(),
                         &key_format(&[&info.coin.clone(), &key_name]),
-                        app_data.hashrate_interval.interval,
-                        app_data.hashrate_interval.retention,
+                        &app_data.hashrate_interval
                     )
                     .await
                 },
@@ -84,8 +87,7 @@ pub fn pool_history_route(cfg: &mut web::ServiceConfig) {
                     history(
                         &mut app_data.redis.clone(),
                         &key_format(&[&info.coin.clone(), &key_name]),
-                        app_data.block_interval.interval,
-                        app_data.block_interval.retention,
+                        &app_data.hashrate_interval
                     )
                     .await
                 },
@@ -107,8 +109,7 @@ pub fn pool_history_route(cfg: &mut web::ServiceConfig) {
                     history(
                         &mut app_data.redis.clone(),
                         &key_format(&[&info.coin.clone(), &key_name]),
-                        app_data.block_interval.interval,
-                        app_data.block_interval.retention,
+                        &app_data.block_interval
                     )
                     .await
                 },

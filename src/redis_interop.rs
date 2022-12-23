@@ -1,20 +1,16 @@
 use serde::{Serialize, Serializer};
-use std::fmt;
 use serde_repr::*;
+use std::fmt;
 
 #[cxx::bridge]
 pub mod ffi {
-    
+
     #[derive(Debug)]
     enum Prefix {
         POW,
-        PAYOUT,
-        PAYOUT_FEELESS,
-        PAYOUTS,
         ADDRESS,
         ADDRESS_ID_MAP,
         ALIAS,
-        PAYOUT_THRESHOLD,
         IDENTITY,
         ROUND,
         EFFORT,
@@ -53,10 +49,6 @@ pub mod ffi {
         DIFFICULTY,
         ROUND_EFFORT,
 
-        PAYEES,
-        FEE_PAYEES,
-        PENDING_AMOUNT,
-        PENDING_AMOUNT_FEE,
         PENDING,
         FEELESS,
         MINER,
@@ -72,32 +64,14 @@ pub mod ffi {
 
     #[derive(Debug)]
     pub enum BlockStatus {
-        PENDING = 0,
-        CONFIRMED = 1,
-        ORPHANED = 2,
-    }
-
-    //#[repr(C)] // don't modify order
-    #[derive(Debug, Serialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct BlockSubmission {
-        pub id: u32,
-        pub confirmations: i32,
-        pub block_type: u8,
-        pub chain: u8,
-        pub reward: u64,
-        pub time_ms: u64,
-        pub duration_ms: u64,
-        pub height: u32,
-        pub difficulty: f64,
-        pub effort_percent: f64,
-
-        #[serde(rename(serialize = "hash"))]
-        pub hash_hex: String,
-        pub solver: String,
+        PENDING = 0b1,
+        CONFIRMED = 0b10,
+        ORPHANED = 0b100,
+        PAID = 0b1000,
+        
+        PENDING_ORPHANED = 0b101
     }
 }
-
 
 fn x() -> String {
     format!("{:?}", ffi::Prefix::ACTIVE_IDS)

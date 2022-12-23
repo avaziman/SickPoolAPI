@@ -6,9 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-actix-web = "4"
+actix-web = { version = "4", features = ["openssl"] }
+openssl = { version = "0.10", features = ["v110"] }
+
 actix-cors = "0.6.1"
-redis = {version = "0.22.1", features = ["tokio-comp", "connection-manager"]}
+redis = { version = "0.22.1", features = ["tokio-comp", "connection-manager"] }
 # redis_ts = { version = "0.4.1", features = ['tokio-comp'] }
 redis_ts = { git="https://github.com/ISickMan/redis_ts/", branch="empty_buckettimestamp", features = ['tokio-comp'] }
 env_logger = "0.9.0"

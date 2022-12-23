@@ -52,10 +52,11 @@ async fn solver_overview(
 
     // lowercase or id_tag@ to valid address
     let stmt = con_mysql
-        .prep("SELECT address,alias FROM addresses WHERE address = ? OR alias = ?")
+        .prep("CALL GetMinerOverview(?)")
         .unwrap();
-    let (address, alias): (String, Option<String>) =
-        match con_mysql.exec_first(&stmt, (&info.address, &info.address)) {
+
+    let (address, alias, mature_balance, immature_balance): (String, Option<String>, u64, u64) =
+        match con_mysql.exec_first(&stmt, (info.address.to_ascii_lowercase(),)) {
             Ok(res) => match res {
                 Some(re) => re,
                 None => {
@@ -66,8 +67,6 @@ async fn solver_overview(
                 return addr_not_found();
             }
         };
-
-    let (immature_balance, mature_balance): (u64, u64) = (0, 0);
 
 
     HttpResponse::Ok().body(
@@ -90,57 +89,3 @@ pub fn miner_id_filter(addr: &String) -> TsFilterOptions {
         TsFilterOptions::default().equals("address", addr.to_ascii_lowercase())
     }
 }
-
-// #[get("/balanceHistory")]
-// async fn balance_history(
-//     req: HttpRequest,
-//     info: web::Query<OverviewQuery>,
-//     api_data: web::Data<SickApiData>,
-// ) -> impl Responder {
-//     let mut con = api_data.redis.clone();
-
-//     let filter: TsFilterOptions = if info.address.is_some() {
-//         TsFilterOptions::default()
-//             .equals("type", ts_type)
-//             .equals("address", info.address.as_ref().unwrap())
-//     } else if info.id.is_some() {
-//         TsFilterOptions::default()
-//             .equals("type", ts_type)
-//             .equals("id", info.id.as_ref().unwrap())
-//     } else {
-//         return HttpResponse::BadRequest().body("No address or id provided.");
-//     };
-
-//     let tms: TsRange<u64, f64> = match con.ts_range(key, 0, "+", None::<usize>, None).await {
-//         Ok(res) => res,
-//         Err(err) => {
-//             eprintln!("range query error: {}", err);
-//             return HttpResponse::NotFound().body(
-//                 json!({
-//                     "error": "Key not found",
-//                     "result": Value::Null
-//                 })
-//                 .to_string(),
-//             );
-//         }
-//     };
-
-//     let mut res_vec: Vec<BalanceEntry> = Vec::new();
-//     res_vec.reserve(tms.values.len());
-
-//     // timeserieses are sorted by alphabetical order
-//     for (i, el) in tms.values.iter().enumerate() {
-//         res_vec.push(BalanceEntry {
-//             time: el.0,
-//             balance: el.1 as f64,
-//         });
-//     }
-
-//     HttpResponse::Ok().body(
-//         json!({
-//             "error": Value::Null,
-//             "result": res_vec
-//         })
-//         .to_string(),
-//     )
-// }

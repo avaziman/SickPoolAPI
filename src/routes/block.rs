@@ -3,11 +3,28 @@ use std::fmt::UpperHex;
 use crate::redis_interop::ffi;
 use serde::Serialize;
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockSubmission {
+    pub id: u32,
+    pub status: i8,
+    pub chain: u8,
+    pub reward: u64,
+    pub time_ms: u64,
+    pub duration_ms: u64,
+    pub height: u32,
+    pub difficulty: f64,
+    pub effort_percent: f64,
+
+    #[serde(rename(serialize = "hash"))]
+    pub hash_hex: String,
+    pub solver: String,
+}
 // #[derive(Debug, Serialize)]
 // #[serde(rename_all = "camelCase")]
 // pub struct Block {
 //     #[serde(flatten)]
-    // pub raw: ffi::BlockSubmission,
+// pub raw: ffi::BlockSubmission,
 //     #[serde(rename = "hash")]
 //     pub hash_hex: String,
 //     pub solver: String
@@ -16,7 +33,7 @@ use serde::Serialize;
 // impl redis::FromRedisValue for Block {
 //     fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
 //         let bytes: Vec<u8> = redis::from_redis_value(&value)?;
-        
+
 //         if bytes.len() == std::mem::size_of::<ffi::BlockSubmission>() {
 //             let block_res = parse_block(&bytes);
 

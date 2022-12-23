@@ -6,6 +6,8 @@ use redis_ts::{
     TsMrange, TsRange,
 };
 
+use super::history::TimeSeriesInterval;
+
 pub fn key_format<const N: usize>(strs: &[&str; N]) -> String {
     let mut res: String = String::new();
     for item in strs.iter() {
@@ -17,38 +19,43 @@ pub fn key_format<const N: usize>(strs: &[&str; N]) -> String {
     res
 }
 
+pub fn get_range_params(interval: &TimeSeriesInterval) -> (u64, u64, u64){
+    let curtime = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+
+    let last_timestamp = curtime - curtime % interval.interval;
+    let first_timestamp = last_timestamp + interval.interval - interval.retention;
+    let points_amount: u64 = interval.retention / interval.interval;
+
+    (first_timestamp, last_timestamp, points_amount)
+}
+
 pub async fn get_ts_points(
     con: &mut ConnectionManager,
     key: &String,
-    interval: u64,
-    retention: u64,
-) -> Vec<(u64, f64)> {
-    let curtime = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
-    let last_timestamp = curtime - curtime % interval;
-    let first_timestamp = last_timestamp + interval - retention;
+    interval: &TimeSeriesInterval
+) -> Option<Vec<(u64, f64)>> {
+    let (first_timestamp, last_timestamp, points_amount) = get_range_params(interval);
 
-    let points_amount: u64 = retention / interval;
-
-    let mut tms: TsRange<u64, f64> = match con
+    let tms: TsRange<u64, f64> = match con
         .ts_range(key, first_timestamp * 1000, last_timestamp * 1000, Some(points_amount), None::<TsAggregationOptions>)
         .await
     {
         Ok(res) => res,
         Err(err) => {
             eprintln!("range query error: {}", err);
-            return Vec::<(u64, f64)>::new();
+            return None;
         }
     };
 
-    if tms.values.len() == points_amount as usize {
-        tms.values
-    } else {
-        fill_gaps(&mut tms.values, first_timestamp, interval, points_amount)
-    }
-
+    Some(fill_gaps(tms.values, first_timestamp, interval.interval, points_amount))
 }
 
-fn fill_gaps(points: &mut Vec<(u64, f64)>, first_timestamp: u64, interval: u64, points_amount: u64) -> Vec<(u64, f64)>{
+pub fn fill_gaps(points: Vec<(u64, f64)>, first_timestamp: u64, interval: u64, points_amount: u64) -> Vec<(u64, f64)>{
+    if points.len() == points_amount as usize {
+        return points;
+    }
+    
+
     let mut res: Vec<(u64, f64)> = Vec::new();
     let mut j = 0;
 
