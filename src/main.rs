@@ -89,17 +89,6 @@ async fn main() -> std::io::Result<()> {
         listen_redis(&client);
     });
 
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
-    builder
-        .set_private_key_file(
-            "/etc/letsencrypt/live/sickpool.io/privkey.pem",
-            SslFiletype::PEM,
-        )
-        .expect("Failed to find private key file");
-    builder
-        .set_certificate_chain_file("/etc/letsencrypt/live/sickpool.io/fullchain.pem")
-        .expect("Failed to find certificate chain file");
-
     HttpServer::new(move || {
         let cors = actix_cors::Cors::default().allow_any_origin();
 
@@ -120,8 +109,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
         // .wrap(middleware::Logger::default())
     })
-    // .bind(("0.0.0.0", 80))?
-    .bind_openssl(("127.0.0.1", 2222), builder)?
+    .bind(("0.0.0.0", 80))?
     .run()
     .await
 }
