@@ -14,12 +14,18 @@ use serde_json::{json, Value};
 #[derive(Debug, Serialize)]
 pub struct Solver {
     pub id: u32,
-    pub address: String,
     pub hashrate: f64,
     pub round_effort: f64,
     // pub worker_count: u32,
-    pub balance: u64,
+    #[serde(flatten)]
+    pub info: SolverInfo
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SolverInfo {
+    pub address: String,
     pub joined: u64,
+    pub mature_balance: u64,
 }
 
 #[derive(Deserialize)]

@@ -60,7 +60,7 @@ async fn main() -> std::io::Result<()> {
     let pool = Pool::new(mysql_opts).expect("Can't connect to MySql DB");
 
     println!("Connecting to redisDB...");
-    let client = redis::Client::open(config.redis.host).expect("Can't create Redis client");
+    let client = redis::Client::open(String::from("redis://") + &config.redis.host).expect("Can't create Redis client");
     let con_manager: redis::aio::ConnectionManager = client
         .get_tokio_connection_manager()
         .await
@@ -100,6 +100,8 @@ async fn main() -> std::io::Result<()> {
                         mysql: pool.clone(),
                         hashrate_interval: hr_timeseries.clone(),
                         block_interval: block_timeseries.clone(),
+                        min_payout: config.min_payout_threshold,
+                        fee: config.pow_fee
                     }))
                     .service(web::scope("/pool").configure(pool::pool_route))
                     .service(web::scope("/network").configure(network::network_route))
@@ -109,7 +111,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
         // .wrap(middleware::Logger::default())
     })
-    .bind(("0.0.0.0", 80))?
+    .bind(("127.0.0.1", 2222))?
     .run()
     .await
 }

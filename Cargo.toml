@@ -11,15 +11,18 @@ openssl = { version = "0.10", features = ["v110"] }
 
 actix-cors = "0.6.1"
 redis = { version = "0.22.1", features = ["tokio-comp", "connection-manager"] }
-redis_ts = { version = "0.5.0", features = ['tokio-comp'] }
-
+# redis_ts = { version = "0.4.1", features = ['tokio-comp'] }
+redis_ts = { version= "0.5", features = ["tokio-comp"] }
 env_logger = "0.9.0"
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.59"
-serde_repr = "0.1"
 
 mysql = "*"
+cxx = "1.0"
+hex = "0.4"
 
+#chartgen = { git = "https://github.com/ItsSickGuy/ChartGen" }
+# sickpool = {git = "https://github.com/ItsSickGuy/SickPool"}
 
 #[patch]
 # chartgen = { path = "/home/sickguy/.cargo/git/checkouts/chartgen-28545a3ad2ef82cf/7c2e54f/" }

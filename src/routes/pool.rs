@@ -1,4 +1,5 @@
 use crate::api_data::{CoinQuery, SickApiData};
+use crate::routes::solver::SolverInfo;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 extern crate redis;
 use std::fmt;
@@ -10,8 +11,7 @@ use crate::routes::redis::{get_ts_points, key_format};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, FromRedisValue};
 use redis_ts::{
-    AsyncTsCommands, TsAggregationType, TsBucketTimestamp, TsFilterOptions,
-    TsMrange, TsRange,
+    AsyncTsCommands, TsAggregationType, TsBucketTimestamp, TsFilterOptions, TsMrange, TsRange,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -450,7 +450,7 @@ async fn block_overview(
 
     let key = key_format(&[&info.coin, &Prefix::DIFFICULTY.to_string()]);
     let difficulty: Option<(u64, f64)> = con.ts_get(key).await.unwrap();
-    let difficulty = difficulty.unwrap().1;
+    let difficulty = difficulty.unwrap_or((0, 0.0));
 
     let (mined, orphaned, average_effort, average_duration): (u64, u64, f64, f64) = mysql_con
         .query_first(
@@ -489,18 +489,18 @@ impl fmt::Display for ffi::Prefix {
 
 #[get("/blocks")]
 async fn blocks(
-    info: web::Query<TableQuerySort>,
+    mut info: web::Query<TableQuerySort>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con = api_data.mysql.get_conn().unwrap();
+    info.sortdir = get_sortdir(&info.sortdir);
 
-    if (&info.sortdir != "asc" && &info.sortdir != "desc")
-        || (info.sortdir != "id"
-            && info.sortdir != "status"
-            && info.sortdir != "reward"
-            && info.sortdir != "duration_ms"
-            && info.sortdir != "difficulty"
-            && info.sortdir != "effort_percent")
+    if info.sortby != "id"
+        && info.sortby != "status"
+        && info.sortby != "reward"
+        && info.sortby != "duration_ms"
+        && info.sortby != "difficulty"
+        && info.sortby != "effort_percent"
     {
         HttpResponse::BadRequest().body("invalid sort");
     }
@@ -569,31 +569,28 @@ async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>)
     let payouts_vec = con
         .query_map(
             "SELECT id, txid, payee_amount, paid_amount, tx_fee, time_ms FROM payouts",
-            |(
-                id,
-                txid,
-                payee_amount,
-                paid_amount,
-                tx_fee,
-                time_ms
-            ): (u32, String, u32, u64, u64, u64)| {
+            |(id, txid, payee_amount, paid_amount, tx_fee, time_ms): (
+                u32,
+                String,
+                u32,
+                u64,
+                u64,
+                u64,
+            )| {
                 Payout {
                     id,
                     txid,
                     payee_amount,
                     paid_amount,
                     tx_fee,
-                    time_ms
+                    time_ms,
                 }
             },
         )
         .unwrap();
 
-
     let total: u64 = con
-        .query_first(
-            "SELECT count FROM payout_stats",
-        )
+        .query_first("SELECT count FROM payout_stats")
         .unwrap()
         .unwrap();
 
@@ -602,19 +599,23 @@ async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>)
         entries: payouts_vec,
     };
 
-    return HttpResponse::Ok().body(json!({"result": res, "error": Value::Null}).to_string());        
+    return HttpResponse::Ok().body(json!({"result": res, "error": Value::Null}).to_string());
+}
+
+fn get_sortdir(s: &String) -> String {
+    if s.to_lowercase() == "asc" {
+        return String::from("ASC");
+    }
+    return String::from("DESC");
 }
 
 #[get("/miners")]
 async fn miners(
-    info: web::Query<TableQuerySort>,
+    mut info: web::Query<TableQuerySort>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
     let mut con_redis = api_data.redis.clone();
     let mut con_mysql = api_data.mysql.get_conn().unwrap();
-
-    let solver_index_prefix =
-        info.coin.clone() + ":SOLVER:INDEX:" + &info.sortby.clone().to_uppercase();
 
     let round_effort_key = key_format(&[
         &info.coin,
@@ -629,31 +630,83 @@ async fn miners(
         &Prefix::HASHRATE.to_string(),
     ]);
 
-    let mut ids: Option<Vec<u32>> = None;
+    let mut ids: Option<Vec<u32>> = Some(Vec::new());
+    info.sortdir = get_sortdir(&info.sortdir);
 
-    if info.sortby == "round-effort" {
+    let redis_index = if info.sortby == "round-effort" {
         // miner id -> effort
         ids = zrange_table(&mut con_redis, &round_effort_key, &info).await;
+        true
     } else if info.sortby == "hashrate" {
         ids = zrange_table(&mut con_redis, &hashrate_index, &info).await;
-    }
+        true
+    } else if info.sortby == "mature_balance" || info.sortby == "join_time" {
+        false
+    } else {
+        return redis_error();
+    };
 
-    let ids = match ids {
+    let mut ids = match ids {
         Some(r) => r,
         None => {
             return redis_error();
         }
     };
 
+    let mut miners_info: Vec<SolverInfo> = Vec::new();
+    let mut miners: Vec<Solver> = Vec::new();
+
+    if redis_index {
+        let stmt = con_mysql.prep("SELECT addresses.address_md5,join_time,mature_balance FROM miners INNER JOIN addresses ON miners.address_id = addresses.id WHERE address_id = ?").unwrap();
+        if miners.len() < info.limit as usize {
+            let remaining = info.limit as usize - miners.len();
+        }
+
+        for id in ids.iter() {
+            let (address, joined, mature_balance): (String, u64, u64) =
+                match con_mysql.exec_first(&stmt, (id,)) {
+                    Ok(r) => match r {
+                        Some(r) => r,
+                        None => continue,
+                    },
+                    Err(e) => {
+                        println!("Miner with id {} not found in mysql db", id);
+                        continue;
+                    }
+                };
+            miners_info.push(SolverInfo {
+                address,
+                joined,
+                mature_balance,
+            });
+        }
+
+    } else {
+        miners_info = match con_mysql.query_map(format!("SELECT id,addresses.address_md5,join_time,mature_balance FROM miners INNER JOIN addresses ON miners.address_id = addresses.id ORDERBY {} {} LIMIT {}", &info.sortby, &info.sortdir, &info.limit), |(id, address, joined, mature_balance): (u32, String, u64, u64)|{
+            ids.push(id);
+            SolverInfo {
+                address,
+                joined,
+                mature_balance
+            }
+        }){
+            Ok(r) => r,
+            Err(r) => {return redis_error();}
+        };
+    }
+
     let round_info_key = key_format(&[
         &info.coin,
         &Prefix::ROUND.to_string(),
         &Prefix::STATS.to_string(),
     ]);
-    let total_effort: f64 = con_redis
+    let total_effort: f64 = match con_redis
         .hget(round_info_key, Prefix::TOTAL_EFFORT.to_string())
         .await
-        .unwrap_or(0.0);
+    {
+        Ok(r) => r,
+        Err(err) => 0.0,
+    };
 
     // HANDLE
     let hashrates: Vec<Option<f64>> = zscore_ids(&mut con_redis, &hashrate_index, &ids)
@@ -663,34 +716,22 @@ async fn miners(
         .await
         .unwrap();
 
-    let mut miners: Vec<Solver> = Vec::new();
     miners.reserve(ids.len());
 
-    let stmt = con_mysql.prep("SELECT addresses.address_md5,join_time FROM miners INNER JOIN addresses ON miners.address_id = addresses.id WHERE address_id = ?").unwrap();
+    for (i, info) in miners_info.iter().enumerate(){
+            miners.push(Solver {
+                id: ids[i],
+                hashrate: match hashrates[i] {
+                    Some(r) => r,
+                    None => 0.0,
+                },
+                round_effort: match efforts[i] {
+                    Some(r) => r / total_effort,
+                    None => 0.0,
+                },
+                info: info.clone()
+            });
 
-    for (i, id) in ids.iter().enumerate() {
-        let (addr, join_time): (String, u64) = match con_mysql.exec_first(&stmt, (id,)) {
-            Ok(r) => r.unwrap(), // NOT NULL so safe
-            Err(e) => {
-                println!("Miner with id {} not found in mysql db", id);
-                continue;
-            }
-        };
-
-        miners.push(Solver {
-            id: *id,
-            address: addr,
-            hashrate: match hashrates[i] {
-                Some(r) => r,
-                None => 0.0,
-            },
-            round_effort: match efforts[i] {
-                Some(r) => r / total_effort,
-                None => 0.0,
-            },
-            balance: 0,
-            joined: join_time,
-        });
     }
 
     let total: u64 = con_mysql
@@ -765,12 +806,12 @@ async fn payout_overview(
     HttpResponse::Ok().body(
         json!({
             "error": Value::Null,
-            "next_payout": next,
-            "total_paid": amount,
-            "total_payouts": count,
+            "nextPayout": next,
+            "totalPaid": amount,
+            "totalPayouts": count,
             "scheme": "PPLNS",
-            "fee": 0.01,
-            "minimum_threshold": 1,
+            "fee": api_data.fee,
+            "minimumThreshold": api_data.min_payout,
         })
         .to_string(),
     )
