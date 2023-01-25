@@ -52,11 +52,16 @@ fn addr_not_found() -> HttpResponse {
 
 #[get("/overview")]
 async fn solver_overview(
-    info: web::Query<OverviewQuery>,
+    mut info: web::Query<OverviewQuery>,
     api_data: web::Data<SickApiData>,
 ) -> impl Responder {
-    let mut con = api_data.redis.clone();
     let mut con_mysql = api_data.mysql.get_conn().unwrap();
+
+    if info.address.starts_with('@'){
+        info.address.remove(0); 
+    }else {
+        info.address = info.address.to_lowercase(); 
+    }
 
     // lowercase or id_tag@ to valid address
     let stmt = con_mysql
@@ -64,7 +69,7 @@ async fn solver_overview(
         .unwrap();
 
     let (address, alias, mature_balance, immature_balance): (String, Option<String>, u64, u64) =
-        match con_mysql.exec_first(&stmt, (info.address.to_ascii_lowercase(),)) {
+        match con_mysql.exec_first(&stmt, (&info.address,)) {
             Ok(res) => match res {
                 Some(re) => re,
                 None => {
@@ -92,7 +97,7 @@ async fn solver_overview(
 
 pub fn miner_alias_filter(addr: &String) -> TsFilterOptions {
     if addr.starts_with('@') {
-        TsFilterOptions::default().equals("alias", addr)
+        TsFilterOptions::default().equals("alias", &addr[1..addr.len()])
     } else {
         TsFilterOptions::default().equals("address", addr.to_ascii_lowercase())
     }
