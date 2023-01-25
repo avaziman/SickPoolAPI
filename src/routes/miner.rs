@@ -238,7 +238,7 @@ async fn workers(
                 average_hr: e.1,
                 current_hr: tms.values[i + 1 * worker_count].value.unwrap().1,
                 invalid_shares: tms.values[i + worker_count * 2].value.unwrap().1 as u64,
-                stale_shares: tms.values[i + worker_count + 3].value.unwrap().1 as u64,
+                stale_shares: tms.values[i + worker_count * 3].value.unwrap().1 as u64,
                 time: e.0,
                 valid_shares: tms.values[i + worker_count * 4].value.unwrap().1 as u64,
             }
