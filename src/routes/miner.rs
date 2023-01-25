@@ -1,3 +1,4 @@
+use crate::routes::pool::redis_error;
 use crate::routes::redis::get_range_params;
 use crate::SickApiData;
 
@@ -5,7 +6,7 @@ use super::solver::OverviewQuery;
 use crate::ffi::Prefix;
 use crate::routes::redis::fill_gaps;
 use crate::routes::redis::key_format;
-use crate::solver::miner_id_filter;
+use crate::solver::miner_alias_filter;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use redis::aio::ConnectionManager;
 use redis_ts::{AsyncTsCommands, TsAggregationType, TsFilterOptions, TsMget, TsMrange, TsRange};
@@ -50,11 +51,7 @@ async fn stats_history(
     let mut con = api_data.redis.clone();
 
     let ts_type = format!(
-        "({},\
-                {},\
-                {},\
-                {},\
-                {})",
+        "({},{},{},{},{})",
         &Prefix::HASHRATE.to_string(),
         &key_format(&[&Prefix::HASHRATE.to_string(), &Prefix::AVERAGE.to_string()]),
         &key_format(&[&Prefix::SHARES.to_string(), &Prefix::VALID.to_string()]),
@@ -62,39 +59,33 @@ async fn stats_history(
         &key_format(&[&Prefix::SHARES.to_string(), &Prefix::INVALID.to_string()])
     );
 
-    let filter: TsFilterOptions = miner_id_filter(&info.address.to_lowercase())
+    let filter: TsFilterOptions = miner_alias_filter(&info.address.to_lowercase())
         .equals("prefix", Prefix::MINER.to_string())
         .equals("type", ts_type);
 
+    let (first_timestamp, last_timestamp, points_amount) =
+        get_range_params(&api_data.hashrate_interval);
+
     let tms: TsMrange<u64, f64> = match con
-        .ts_mrange(0, "+", None::<usize>, None::<TsAggregationType>, filter)
+        .ts_mrange(
+            first_timestamp,
+            last_timestamp,
+            Some(points_amount),
+            None::<TsAggregationType>,
+            filter,
+        )
         .await
     {
         Ok(res) => res,
         Err(err) => {
             eprintln!("range query error: {}", err);
-            return HttpResponse::NotFound().body(
-                json!({
-                    "error": "Key not found",
-                    "result": Value::Null
-                })
-                .to_string(),
-            );
+            return redis_error();
         }
     };
 
     if tms.values.len() != 5 {
-        return HttpResponse::NotFound().body(
-            json!({
-                "error": "Missing data",
-                "result": Value::Null
-            })
-            .to_string(),
-        );
+        return redis_error();
     }
-
-    let (first_timestamp, last_timestamp, points_amount) =
-        get_range_params(&api_data.hashrate_interval);
 
     let mut results: Vec<Vec<(u64, f64)>> = Vec::new();
     results.reserve(5);
@@ -117,7 +108,7 @@ async fn stats_history(
             current_hr: results[1][i].1,
             invalid_shares: results[2][i].1 as u64,
             stale_shares: results[3][i].1 as u64,
-            time: el.0, // seconds not ms
+            time: el.0 / 1000, // seconds not ms
             valid_shares: results[4][i].1 as u64,
         });
     }
@@ -141,7 +132,7 @@ async fn worker_history(
 
     let ts_type = "worker-count";
 
-    let filter: TsFilterOptions = miner_id_filter(&info.address).equals("type", ts_type);
+    let filter: TsFilterOptions = miner_alias_filter(&info.address).equals("type", ts_type);
 
     let tms: TsMrange<u64, f64> = match con
         .ts_mrange(0, "+", None::<usize>, None::<TsAggregationType>, filter)
@@ -202,11 +193,7 @@ async fn workers(
     let mut con = api_data.redis.clone();
 
     let ts_type = format!(
-        "({},\
-            {},\
-            {},\
-            {},\
-            {})",
+        "({},{},{},{},{})",
         &Prefix::HASHRATE.to_string(),
         &key_format(&[&Prefix::HASHRATE.to_string(), &Prefix::AVERAGE.to_string()]),
         &key_format(&[&Prefix::SHARES.to_string(), &Prefix::VALID.to_string()]),
@@ -216,7 +203,7 @@ async fn workers(
 
     // TODO: make selected labels support
     let filter: TsFilterOptions;
-    filter = miner_id_filter(&info.address)
+    filter = miner_alias_filter(&info.address)
         .equals("prefix", Prefix::WORKER.to_string())
         .equals("type", ts_type)
         .with_labels(true);
@@ -225,13 +212,7 @@ async fn workers(
         Ok(res) => res,
         Err(err) => {
             eprintln!("tsget query error: {}", err);
-            return HttpResponse::NotFound().body(
-                json!({
-                    "error": "Key not found",
-                    "result": Value::Null
-                })
-                .to_string(),
-            );
+            return redis_error();
         }
     };
     // println!("{:?}", tms);
@@ -243,9 +224,24 @@ async fn workers(
     for i in 0..worker_count {
         let worker_name_label: &(String, String) = &tms.values[i * 5].labels[4];
 
-        if tms.values[i].value.is_none() {
+        let entry = match tms.values[i].value {
             // the worker hasn't gotten any statistics yet
-            continue;
+            None => HashrateEntry {
+                average_hr: 0.0,
+                current_hr: 0.0,
+                invalid_shares: 0,
+                stale_shares: 0,
+                time: 0,
+                valid_shares: 0,
+            },
+            Some(e) => HashrateEntry {
+                average_hr: e.1,
+                current_hr: tms.values[i + 1 * worker_count].value.unwrap().1,
+                invalid_shares: tms.values[i + worker_count * 2].value.unwrap().1 as u64,
+                stale_shares: tms.values[i + worker_count + 3].value.unwrap().1 as u64,
+                time: e.0,
+                valid_shares: tms.values[i + worker_count * 4].value.unwrap().1 as u64,
+            }
         };
 
         // if (tms.values[i].value.unwrap().1 < ){
@@ -254,14 +250,7 @@ async fn workers(
 
         res_vec.push(WorkerStatsEntry {
             worker: worker_name_label.1.clone(),
-            stats: HashrateEntry {
-                average_hr: tms.values[i].value.unwrap().1,
-                current_hr: tms.values[i + 1 * worker_count].value.unwrap().1,
-                invalid_shares: tms.values[i + worker_count * 2].value.unwrap().1 as u64,
-                stale_shares: tms.values[i + worker_count + 3].value.unwrap().1 as u64,
-                time: tms.values[i].value.unwrap().0,
-                valid_shares: tms.values[i + worker_count * 4].value.unwrap().1 as u64,
-            },
+            stats: entry,
         });
     }
 

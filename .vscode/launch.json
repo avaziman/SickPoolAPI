@@ -19,7 +19,9 @@
                     "kind": "bin"
                 }
             },
-            "args": [],
+            "args": [
+                "/home/sickguy/Documents/Projects/SickPool/server/config/coins/ZANOTEST.json"
+            ],
             "cwd": "${workspaceFolder}"
         },
         {

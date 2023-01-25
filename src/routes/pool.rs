@@ -450,7 +450,7 @@ async fn block_overview(
 
     let key = key_format(&[&info.coin, &Prefix::DIFFICULTY.to_string()]);
     let difficulty: Option<(u64, f64)> = con.ts_get(key).await.unwrap();
-    let difficulty = difficulty.unwrap_or((0, 0.0));
+    let difficulty = difficulty.unwrap_or((0, 0.0)).0;
 
     let (mined, orphaned, average_effort, average_duration): (u64, u64, f64, f64) = mysql_con
         .query_first(
@@ -658,9 +658,9 @@ async fn miners(
 
     if redis_index {
         let stmt = con_mysql.prep("SELECT addresses.address_md5,join_time,mature_balance FROM miners INNER JOIN addresses ON miners.address_id = addresses.id WHERE address_id = ?").unwrap();
-        if miners.len() < info.limit as usize {
-            let remaining = info.limit as usize - miners.len();
-        }
+        // if miners.len() < info.limit as usize {
+        //     let remaining = info.limit as usize - miners.len();
+        // }
 
         for id in ids.iter() {
             let (address, joined, mature_balance): (String, u64, u64) =
@@ -682,7 +682,7 @@ async fn miners(
         }
 
     } else {
-        miners_info = match con_mysql.query_map(format!("SELECT id,addresses.address_md5,join_time,mature_balance FROM miners INNER JOIN addresses ON miners.address_id = addresses.id ORDERBY {} {} LIMIT {}", &info.sortby, &info.sortdir, &info.limit), |(id, address, joined, mature_balance): (u32, String, u64, u64)|{
+        miners_info = match con_mysql.query_map(format!("SELECT id,addresses.address_md5,join_time,mature_balance FROM miners INNER JOIN addresses ON miners.address_id = addresses.id ORDER BY {} {} LIMIT {}", &info.sortby, &info.sortdir, &info.limit), |(id, address, joined, mature_balance): (u32, String, u64, u64)|{
             ids.push(id);
             SolverInfo {
                 address,
@@ -691,7 +691,9 @@ async fn miners(
             }
         }){
             Ok(r) => r,
-            Err(r) => {return redis_error();}
+            Err(r) => {
+                eprintln!("{}", r);
+                return redis_error();}
         };
     }
 

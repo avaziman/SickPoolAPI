@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Solver {
     pub id: u32,
     pub hashrate: f64,
@@ -22,6 +23,7 @@ pub struct Solver {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct SolverInfo {
     pub address: String,
     pub joined: u64,
@@ -88,9 +90,9 @@ async fn solver_overview(
     )
 }
 
-pub fn miner_id_filter(addr: &String) -> TsFilterOptions {
-    if addr.ends_with('@') {
-        TsFilterOptions::default().equals("identity", addr)
+pub fn miner_alias_filter(addr: &String) -> TsFilterOptions {
+    if addr.starts_with('@') {
+        TsFilterOptions::default().equals("alias", addr)
     } else {
         TsFilterOptions::default().equals("address", addr.to_ascii_lowercase())
     }
