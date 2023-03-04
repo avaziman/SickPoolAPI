@@ -12,6 +12,7 @@ use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, FromRedisValue};
 use redis_ts::{
     AsyncTsCommands, TsAggregationType, TsBucketTimestamp, TsFilterOptions, TsMrange, TsRange,
+    TsRangeQuery,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -427,12 +428,13 @@ async fn block_overview(
     let mined24h_ts: TsRange<u64, u64> = match con
         .ts_range(
             mined_key,
-            (curtime - api_data.block_interval.interval) * 1000,
-            curtime * 1000,
-            Some(1),
-            Some(TsAggregationType::Sum(
-                api_data.block_interval.interval * 1000,
-            )),
+            TsRangeQuery::default()
+                .from(curtime - api_data.block_interval.interval * 1000)
+                .to(curtime * 1000)
+                .count(1)
+                .aggregation_type(TsAggregationType::Sum(
+                    api_data.block_interval.interval * 1000,
+                )),
         )
         .await
     {
@@ -680,7 +682,6 @@ async fn miners(
                 mature_balance,
             });
         }
-
     } else {
         miners_info = match con_mysql.query_map(format!("SELECT id,addresses.address_md5,join_time,mature_balance FROM miners INNER JOIN addresses ON miners.address_id = addresses.id ORDER BY {} {} LIMIT {}", &info.sortby, &info.sortdir, &info.limit), |(id, address, joined, mature_balance): (u32, String, u64, u64)|{
             ids.push(id);
@@ -720,20 +721,19 @@ async fn miners(
 
     miners.reserve(ids.len());
 
-    for (i, info) in miners_info.iter().enumerate(){
-            miners.push(Solver {
-                id: ids[i],
-                hashrate: match hashrates[i] {
-                    Some(r) => r,
-                    None => 0.0,
-                },
-                round_effort: match efforts[i] {
-                    Some(r) => r / total_effort,
-                    None => 0.0,
-                },
-                info: info.clone()
-            });
-
+    for (i, info) in miners_info.iter().enumerate() {
+        miners.push(Solver {
+            id: ids[i],
+            hashrate: match hashrates[i] {
+                Some(r) => r,
+                None => 0.0,
+            },
+            round_effort: match efforts[i] {
+                Some(r) => r / total_effort,
+                None => 0.0,
+            },
+            info: info.clone(),
+        });
     }
 
     let total: u64 = con_mysql

@@ -9,6 +9,7 @@ use crate::routes::redis::key_format;
 use crate::solver::miner_alias_filter;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use redis::aio::ConnectionManager;
+use redis_ts::TsRangeQuery;
 use redis_ts::{AsyncTsCommands, TsAggregationType, TsFilterOptions, TsMget, TsMrange, TsRange};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -63,15 +64,17 @@ async fn stats_history(
         .equals("prefix", Prefix::MINER.to_string())
         .equals("type", ts_type);
 
-    let (first_timestamp, last_timestamp, points_amount) =
+    let (first_timestamp, last_timestamp) =
         get_range_params(&api_data.hashrate_interval);
 
     let tms: TsMrange<u64, f64> = match con
         .ts_mrange(
-            first_timestamp,
-            last_timestamp,
-            Some(points_amount),
-            None::<TsAggregationType>,
+            TsRangeQuery::default()
+                .from(first_timestamp)
+                .to(last_timestamp)
+                .count(api_data.hashrate_interval.amount)
+                .aggregation_type(TsAggregationType::Sum(api_data.hashrate_interval.interval))
+                .empty(true),
             filter,
         )
         .await
@@ -93,13 +96,13 @@ async fn stats_history(
     for (i, el) in tms.values.iter().enumerate() {
         results.push(fill_gaps(
             el.values.clone(),
-            first_timestamp,
+                first_timestamp,
             api_data.hashrate_interval.interval,
-            points_amount,
+            api_data.hashrate_interval.amount,
         ));
     }
     let mut res_vec: Vec<HashrateEntry> = Vec::new();
-    res_vec.reserve(points_amount as usize);
+    res_vec.reserve(api_data.hashrate_interval.amount as usize);
 
     // timeserieses are sorted by alphabetical order
     for (i, el) in results.first().unwrap().iter().enumerate() {
@@ -135,7 +138,7 @@ async fn worker_history(
     let filter: TsFilterOptions = miner_alias_filter(&info.address).equals("type", ts_type);
 
     let tms: TsMrange<u64, f64> = match con
-        .ts_mrange(0, "+", None::<usize>, None::<TsAggregationType>, filter)
+        .ts_mrange(TsRangeQuery::default(), filter)
         .await
     {
         Ok(res) => res,
@@ -241,7 +244,7 @@ async fn workers(
                 stale_shares: tms.values[i + worker_count * 3].value.unwrap().1 as u64,
                 time: e.0,
                 valid_shares: tms.values[i + worker_count * 4].value.unwrap().1 as u64,
-            }
+            },
         };
 
         // if (tms.values[i].value.unwrap().1 < ){

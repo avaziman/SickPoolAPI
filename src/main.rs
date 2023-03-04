@@ -32,6 +32,7 @@ use std::io::Read;
 mod config;
 use config::CoinConfig;
 
+use crate::routes::history::get_time_series;
 use crate::routes::history::TimeSeriesInterval;
 use serde_json::json;
 
@@ -75,15 +76,15 @@ async fn main() -> std::io::Result<()> {
     );
     println!("Hashrate ttl: {}", config.redis.hashrate_ttl_seconds);
 
-    let hr_timeseries = TimeSeriesInterval {
-        interval: config.stats.hashrate_interval_seconds as u64,
-        retention: config.redis.hashrate_ttl_seconds as u64,
-    };
+    let hr_timeseries = get_time_series(
+        config.stats.hashrate_interval_seconds as u64,
+        config.redis.hashrate_ttl_seconds as u64,
+    );
 
-    let block_timeseries = TimeSeriesInterval {
-        interval: config.stats.mined_blocks_interval as u64,
-        retention: config.stats.mined_blocks_interval as u64 * 30u64,
-    };
+    let block_timeseries = get_time_series(
+        config.stats.mined_blocks_interval as u64,
+        config.stats.mined_blocks_interval as u64 * 30u64,
+    );
     // allow all origins
     std::thread::spawn(move || {
         listen_redis(&client);
