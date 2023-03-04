@@ -2,14 +2,16 @@ use crate::api_data::{self, CoinQuery, SickApiData};
 use crate::ffi::Prefix;
 use crate::routes::redis::{get_ts_points, key_format};
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
+use redis::FromRedisValue;
 use redis::aio::ConnectionManager;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::pool::redis_error;
 use super::redis::get_range_params;
 
-fn GetTimestampInfo(interval: &TimeSeriesInterval) -> serde_json::Value {
+fn get_timestamp_info(interval: &TimeSeriesInterval) -> serde_json::Value {
     let (first_timestamp, last_timestamp) = get_range_params(interval);
     json!({
         "start": first_timestamp / 1000,
@@ -18,37 +20,57 @@ fn GetTimestampInfo(interval: &TimeSeriesInterval) -> serde_json::Value {
     })
 }
 
-async fn history(
+pub trait ValueTypeTrait{}
+impl ValueTypeTrait for u64{}
+impl ValueTypeTrait for f64{}
+
+pub trait ValuesTrait {}
+impl<ValueTypeTrait> ValuesTrait for HashMap<String, Vec<ValueTypeTrait>>{}
+// single value queries
+impl<ValueTypeTrait> ValuesTrait for Vec<ValueTypeTrait>{}
+
+#[derive(Serialize)]
+struct HistoryResult<T: Serialize + ValuesTrait> {
+    timestamps: Value,
+    // #[serde(flatten)]
+    values: T,
+}
+
+fn history_res<T: Serialize + ValuesTrait>(
+    interval: &TimeSeriesInterval,
+    values: T,
+) -> HttpResponse {
+    HttpResponse::Ok().body(
+        json!({
+            "error": Value::Null,
+            "result": HistoryResult{timestamps: get_timestamp_info(&interval), values: values}
+        })
+        .to_string(),
+    )
+}
+
+async fn history_single<T: ValueTypeTrait + Serialize + Default + Copy + FromRedisValue>(
     con: &mut ConnectionManager,
     key: &String,
     interval: &TimeSeriesInterval,
 ) -> HttpResponse {
-    let points = match get_ts_points(con, key, interval).await {
+    let points: Vec<(u64, T)> = match get_ts_points(con, key, interval).await {
         Some(r) => r,
         None => {
             return redis_error();
         }
     };
 
-    HttpResponse::Ok().body(
-        json!({
-            "error": Value::Null,
-            "result": {
-                "timestamps": GetTimestampInfo(&interval),
-                "values": points.iter().map(|&(_, second)| second).collect::<Vec<f64>>()
-            },
-        })
-        .to_string(),
-    )
+    history_res(interval, points.into_iter().map(|(first, second)| second).collect::<Vec<T>>())
 }
 
-fn get_key_name(coin: &String, prefix: &String, pretty_name: &String) -> String {
-    key_format(&[
-        coin,
-        &prefix,
-        &pretty_name.replace('-', ":").to_ascii_uppercase(),
-    ])
-}
+// fn get_key_name(coin: &String, prefix: &String, pretty_name: &String) -> String {
+//     key_format(&[
+//         coin,
+//         &prefix,
+//         &pretty_name.replace('-', ":").to_ascii_uppercase(),
+//     ])
+// }
 
 #[derive(Clone)]
 pub struct TimeSeriesInterval {
@@ -76,7 +98,7 @@ pub fn network_history_route(cfg: &mut web::ServiceConfig) {
             &path,
             web::get().to(
                 move |app_data: web::Data<SickApiData>, info: web::Query<CoinQuery>| async move {
-                    history(
+                    history_single::<f64>(
                         &mut app_data.redis.clone(),
                         &key_format(&[&info.coin.clone(), &key_name]),
                         &app_data.hashrate_interval,
@@ -100,7 +122,7 @@ pub fn pool_history_route(cfg: &mut web::ServiceConfig) {
             &path,
             web::get().to(
                 move |app_data: web::Data<SickApiData>, info: web::Query<CoinQuery>| async move {
-                    history(
+                    history_single::<f64>(
                         &mut app_data.redis.clone(),
                         &key_format(&[&info.coin.clone(), &key_name]),
                         &app_data.hashrate_interval,
@@ -122,7 +144,7 @@ pub fn pool_history_route(cfg: &mut web::ServiceConfig) {
             &path,
             web::get().to(
                 move |app_data: web::Data<SickApiData>, info: web::Query<CoinQuery>| async move {
-                    history(
+                    history_single::<f64>(
                         &mut app_data.redis.clone(),
                         &key_format(&[&info.coin.clone(), &key_name]),
                         &app_data.block_interval,

@@ -2,6 +2,7 @@ use crate::routes::pool::redis_error;
 use crate::routes::redis::get_range_params;
 use crate::SickApiData;
 
+use super::redis::get_range_query;
 use super::solver::OverviewQuery;
 use crate::ffi::Prefix;
 use crate::routes::redis::fill_gaps;
@@ -69,12 +70,7 @@ async fn stats_history(
 
     let tms: TsMrange<u64, f64> = match con
         .ts_mrange(
-            TsRangeQuery::default()
-                .from(first_timestamp)
-                .to(last_timestamp)
-                .count(api_data.hashrate_interval.amount)
-                .aggregation_type(TsAggregationType::Sum(api_data.hashrate_interval.interval))
-                .empty(true),
+            get_range_query(&api_data.hashrate_interval, first_timestamp, last_timestamp),
             filter,
         )
         .await
@@ -87,15 +83,16 @@ async fn stats_history(
     };
 
     if tms.values.len() != 5 {
+        
         return redis_error();
     }
 
     let mut results: Vec<Vec<(u64, f64)>> = Vec::new();
     results.reserve(5);
 
-    for (i, el) in tms.values.iter().enumerate() {
+    for (i, el) in tms.values.into_iter().enumerate() {
         results.push(fill_gaps(
-            el.values.clone(),
+            el.values,
                 first_timestamp,
             api_data.hashrate_interval.interval,
             api_data.hashrate_interval.amount,
