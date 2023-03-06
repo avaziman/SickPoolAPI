@@ -1,76 +1,118 @@
 use crate::api_data::{self, CoinQuery, SickApiData};
 use crate::ffi::Prefix;
-use crate::routes::redis::{get_ts_points, key_format};
-use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
-use redis::FromRedisValue;
+use crate::routes::redis::{get_ts_values, key_format};
+use actix_web::body::{BoxBody, MessageBody};
+use actix_web::http::header::{ContentType, HeaderName, HeaderValue};
+use actix_web::http::StatusCode;
+use actix_web::{get, web, HttpRequest, HttpResponse, HttpResponseBuilder, Responder};
 use redis::aio::ConnectionManager;
+use redis::FromRedisValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 
 use super::pool::redis_error;
 use super::redis::get_range_params;
 
-fn get_timestamp_info(interval: &TimeSeriesInterval) -> serde_json::Value {
-    let (first_timestamp, last_timestamp) = get_range_params(interval);
-    json!({
-        "start": first_timestamp / 1000,
-        "retention": interval.interval,
-        "amount": interval.amount
-    })
+#[derive(Serialize)]
+pub struct TimestampInfo {
+    pub start: u64,
+    pub interval: u64,
+    pub amount: u64,
 }
 
-pub trait ValueTypeTrait{}
-impl ValueTypeTrait for u64{}
-impl ValueTypeTrait for f64{}
+pub fn get_timestamp_info(interval: &TimeSeriesInterval) -> TimestampInfo {
+    let (first_timestamp, last_timestamp) = get_range_params(interval);
+    TimestampInfo {
+        start: first_timestamp / 1000,
+        interval: interval.interval,
+        amount: interval.amount,
+    }
+}
+
+pub trait ValueTypeTrait {}
+impl ValueTypeTrait for u64 {}
+impl ValueTypeTrait for f64 {}
 
 pub trait ValuesTrait {}
-impl<ValueTypeTrait> ValuesTrait for HashMap<String, Vec<ValueTypeTrait>>{}
+impl<ValueTypeTrait> ValuesTrait for HashMap<String, Vec<ValueTypeTrait>> {}
 // single value queries
-impl<ValueTypeTrait> ValuesTrait for Vec<ValueTypeTrait>{}
+impl<ValueTypeTrait> ValuesTrait for Vec<ValueTypeTrait> {}
 
 #[derive(Serialize)]
-struct HistoryResult<T: Serialize + ValuesTrait> {
-    timestamps: Value,
-    // #[serde(flatten)]
-    values: T,
+pub struct SickResult {
+    #[serde(skip)]
+    pub status_code: StatusCode,
+    pub error: Value,
+    pub result: Value,
+}
+
+impl Responder for SickResult {
+    type Body = BoxBody;
+
+    fn respond_to(self, req: &HttpRequest) -> HttpResponse {
+        HttpResponse::build(self.status_code)
+            .content_type(ContentType::json())
+            .body(json!(self).to_string())
+    }
+}
+
+#[derive(Serialize)]
+pub struct HistoryResult<T: Serialize + ValuesTrait> {
+    pub timestamps: TimestampInfo,
+    pub values: T,
+}
+
+impl<T: Serialize + ValuesTrait> Responder for HistoryResult<T> {
+    type Body = BoxBody;
+
+    fn respond_to(self, req: &HttpRequest) -> HttpResponse<Self::Body> {
+        let mut res = SickResult {
+            status_code: StatusCode::OK,
+            error: Value::Null,
+            result: json!(self),
+        }
+        .respond_to(req);
+
+        let curtime = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let next = self.timestamps.start + self.timestamps.amount * self.timestamps.interval + 1;
+        let cache_for = next - curtime;
+
+        res.headers_mut().insert(
+            HeaderName::from_lowercase(b"cache-control").unwrap(),
+            HeaderValue::from_str(&format!("max-age={}", cache_for)).unwrap(),
+        );
+
+        res
+    }
 }
 
 fn history_res<T: Serialize + ValuesTrait>(
     interval: &TimeSeriesInterval,
     values: T,
-) -> HttpResponse {
-    HttpResponse::Ok().body(
-        json!({
-            "error": Value::Null,
-            "result": HistoryResult{timestamps: get_timestamp_info(&interval), values: values}
-        })
-        .to_string(),
-    )
+) -> HistoryResult<T> {
+    HistoryResult {
+        timestamps: get_timestamp_info(&interval),
+        values: values,
+    }
 }
 
 async fn history_single<T: ValueTypeTrait + Serialize + Default + Copy + FromRedisValue>(
     con: &mut ConnectionManager,
     key: &String,
     interval: &TimeSeriesInterval,
-) -> HttpResponse {
-    let points: Vec<(u64, T)> = match get_ts_points(con, key, interval).await {
+) -> HistoryResult<Vec<T>> {
+    let points: Vec<T> = match get_ts_values(con, key, interval).await {
         Some(r) => r,
-        None => {
-            return redis_error();
-        }
+        None => Vec::new(),
     };
 
-    history_res(interval, points.into_iter().map(|(first, second)| second).collect::<Vec<T>>())
+    history_res(interval, points)
 }
-
-// fn get_key_name(coin: &String, prefix: &String, pretty_name: &String) -> String {
-//     key_format(&[
-//         coin,
-//         &prefix,
-//         &pretty_name.replace('-', ":").to_ascii_uppercase(),
-//     ])
-// }
 
 #[derive(Clone)]
 pub struct TimeSeriesInterval {

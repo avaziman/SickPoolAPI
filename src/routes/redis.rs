@@ -39,11 +39,11 @@ pub fn get_range_query(interval: &TimeSeriesInterval,first_timestamp: u64, last_
                 .empty(true)
 }
 
-pub async fn get_ts_points<T: ValueTypeTrait + Default + Copy + FromRedisValue>(
+pub async fn get_ts_values<T: ValueTypeTrait + Default + Copy + Clone + FromRedisValue>(
     con: &mut ConnectionManager,
     key: &String,
     interval: &TimeSeriesInterval,
-) -> Option<Vec<(u64, T)>> {
+) -> Option<Vec<T>> {
     let (first_timestamp, last_timestamp) = get_range_params(interval);
 
     let tms: TsRange<u64, T> = match con
@@ -61,7 +61,7 @@ pub async fn get_ts_points<T: ValueTypeTrait + Default + Copy + FromRedisValue>(
     };
 
     Some(fill_gaps(
-        tms.values,
+        &tms.values,
         first_timestamp,
         interval.interval,
         interval.amount,
@@ -69,16 +69,14 @@ pub async fn get_ts_points<T: ValueTypeTrait + Default + Copy + FromRedisValue>(
 }
 
 // USING empty gaps can onl be after the last ts entry
-pub fn fill_gaps<T: ValueTypeTrait + Default>(
-    mut points: Vec<(u64, T)>,
+pub fn fill_gaps<T: ValueTypeTrait + Default + Clone + Copy>(
+    points: &Vec<(u64, T)>,
     first_timestamp: u64,
     interval: u64,
     points_amount: u64,
-) -> Vec<(u64, T)> {
+) -> Vec<T> {
 
-    let ineterval_ms = interval * 1000;
-
-    points.resize_with(points_amount as usize, || {(0, T::default())});
-
-    points
+    let mut values : Vec<T> = points.into_iter().map(|(_, second)| *second).collect();
+    values.resize(points_amount as usize, T::default());
+    values
 }

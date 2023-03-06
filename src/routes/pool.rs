@@ -1,12 +1,13 @@
 use crate::api_data::{CoinQuery, SickApiData};
 use crate::routes::solver::SolverInfo;
+use actix_web::http::StatusCode;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 extern crate redis;
 use std::fmt;
 
 use super::block::BlockSubmission;
 use crate::redis_interop::ffi::{self};
-use crate::routes::redis::{get_ts_points, key_format};
+use crate::routes::redis::{get_ts_values, key_format};
 
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, FromRedisValue};
@@ -20,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use super::history::{self, TimeSeriesInterval};
+use super::history::{self, SickResult, TimeSeriesInterval, HistoryResult, ValuesTrait, TimestampInfo};
 use super::payout::Payout;
 use super::solver::{solver_overview, Solver};
 use super::table_res::TableRes;
@@ -29,7 +30,7 @@ use mysql::prelude::*;
 use mysql::*;
 
 // use redisearch_api::{init, Document, FieldType, Index, TagOptions};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 struct TableQuerySort {
@@ -286,7 +287,7 @@ struct MiniChart {
 async fn pool_overview(
     info: web::Query<CoinQuery>,
     api_data: web::Data<SickApiData>,
-) -> impl Responder {
+) -> SickResult {
     let mut con = api_data.redis.clone();
 
     let pool_hashrate_key = format!("{}:HASHRATE:POOL", &info.coin);
@@ -315,58 +316,43 @@ async fn pool_overview(
         Ok(r) => r,
         Err(err) => {
             eprintln!("Database error pool overview: {}", err);
-            return HttpResponse::InternalServerError().body(
-                json!(
-                    {"error": "Database error", "result": Value::Null}
-                )
-                .to_string(),
-            );
+            return redis_error();
         }
     };
 
-    HttpResponse::Ok().body(
-        json!(
-        {
-            "error": Value::Null,
-            "result": {
-                "poolHashrate": pool_hr,
-                "networkHashrate": net_hr,
-                "minerCount": minr_cnt,
-                "workerCount": wker_cnt
-            }
-        })
-        .to_string(),
-    )
+    SickResult {
+        status_code: StatusCode::OK,
+        error: Value::Null,
+        result: json!({
+            "poolHashrate": pool_hr,
+            "networkHashrate": net_hr,
+            "minerCount": minr_cnt,
+            "workerCount": wker_cnt
+        }),
+    }
 }
 
 async fn ts_get_res<T: serde::Serialize + FromRedisValue>(
     con: &mut ConnectionManager,
     key: &String,
-) -> impl Responder {
+) -> SickResult {
     let latest: (u64, T) = match con.ts_get(key).await {
         Ok(res) => match res {
             Some(tuple) => tuple,
             None => {
-                return HttpResponse::InternalServerError().body(
-                    json!(
-                        {"error": "Database error", "result": Value::Null}
-                    )
-                    .to_string(),
-                );
+                return redis_error();
             }
         },
         Err(e) => {
-            eprintln!("Database error: {}", e);
-            return HttpResponse::InternalServerError().body(
-                json!(
-                    {"error": "Database empty error", "result": Value::Null}
-                )
-                .to_string(),
-            );
+            return redis_error();
         }
     };
 
-    HttpResponse::Ok().body(json!({"result": latest.1, "error": Value::Null}).to_string())
+    SickResult {
+        status_code: StatusCode::OK,
+        error: Value::Null,
+        result: json!(latest.1),
+    }
 }
 
 #[get("/blockOverview")]
@@ -374,7 +360,7 @@ async fn block_overview(
     req: HttpRequest,
     info: web::Query<CoinQuery>,
     api_data: web::Data<SickApiData>,
-) -> impl Responder {
+) -> SickResult {
     let mut con = api_data.redis.clone();
     let mut mysql_con = api_data.mysql.get_conn().unwrap();
 
@@ -461,26 +447,24 @@ async fn block_overview(
         .unwrap()
         .unwrap();
 
-    HttpResponse::Ok().body(
-        json!({
-            "error": Value::Null,
-            "result": {
-                "currentRound": {
-                    "effortPercent": total / estimated * 100.0,
-                    "startTime": started as u64
-                },
-                "height": height,
-                "orphans": orphaned,
-                "mined": mined,
-                "averageEffort": average_effort,
-                "averageDuration": average_duration,
-                "mined24h": mined24h,
-                "difficulty": difficulty,
-                "confirmations": 10
-            }
-        })
-        .to_string(),
-    )
+    SickResult {
+        status_code: StatusCode::OK,
+        result: json!({
+            "currentRound": {
+                "effortPercent": total / estimated * 100.0,
+                "startTime": started as u64
+            },
+            "height": height,
+            "orphans": orphaned,
+            "mined": mined,
+            "averageEffort": average_effort,
+            "averageDuration": average_duration,
+            "mined24h": mined24h,
+            "difficulty": difficulty,
+            "confirmations": 10
+        }),
+        error: Value::Null,
+    }
 }
 
 impl fmt::Display for ffi::Prefix {
@@ -493,7 +477,7 @@ impl fmt::Display for ffi::Prefix {
 async fn blocks(
     mut info: web::Query<TableQuerySort>,
     api_data: web::Data<SickApiData>,
-) -> impl Responder {
+) -> SickResult {
     let mut con = api_data.mysql.get_conn().unwrap();
     info.sortdir = get_sortdir(&info.sortdir);
 
@@ -504,7 +488,11 @@ async fn blocks(
         && info.sortby != "difficulty"
         && info.sortby != "effort_percent"
     {
-        HttpResponse::BadRequest().body("invalid sort");
+        return SickResult {
+            status_code: StatusCode::BAD_REQUEST,
+            result: Value::Null,
+            error: json!("invalid sort"),
+        };
     }
 
     let query =
@@ -552,20 +540,27 @@ async fn blocks(
         entries: blocks,
     };
 
-    return HttpResponse::Ok().body(json!({"result": res, "error": Value::Null}).to_string());
+    SickResult {
+        status_code: StatusCode::OK,
+        result: json!(res),
+        error: Value::Null,
+    }
 }
 
-pub fn redis_error() -> HttpResponse {
-    HttpResponse::InternalServerError().body(
-        json!(
-            {"error": "Database error", "result": Value::Null}
-        )
-        .to_string(),
-    )
+pub fn redis_error() -> SickResult {
+    SickResult {
+        status_code: StatusCode::INTERNAL_SERVER_ERROR,
+        error: json!("Database error"),
+        result: Value::Null,
+    }
+}
+
+pub fn history_error<T: Serialize + ValuesTrait + Default>() -> HistoryResult<T>{
+    HistoryResult { timestamps:TimestampInfo { start: 0, interval: 0, amount: 0 }, values: T::default() }
 }
 
 #[get("/payouts")]
-async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> impl Responder {
+async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> SickResult {
     let mut con = api_data.mysql.get_conn().unwrap();
 
     let payouts_vec = con
@@ -601,7 +596,11 @@ async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>)
         entries: payouts_vec,
     };
 
-    return HttpResponse::Ok().body(json!({"result": res, "error": Value::Null}).to_string());
+    SickResult {
+        status_code: StatusCode::OK,
+        result: json!(res),
+        error: Value::Null,
+    }
 }
 
 fn get_sortdir(s: &String) -> String {
@@ -615,7 +614,7 @@ fn get_sortdir(s: &String) -> String {
 async fn miners(
     mut info: web::Query<TableQuerySort>,
     api_data: web::Data<SickApiData>,
-) -> impl Responder {
+) -> SickResult {
     let mut con_redis = api_data.redis.clone();
     let mut con_mysql = api_data.mysql.get_conn().unwrap();
 
@@ -746,7 +745,11 @@ async fn miners(
         entries: miners,
     };
 
-    return HttpResponse::Ok().body(json!({"result": res, "error": Value::Null}).to_string());
+    SickResult {
+        status_code: StatusCode::OK,
+        result: json!(res),
+        error: Value::Null,
+    }
 }
 
 async fn zrange_table(
@@ -790,7 +793,7 @@ async fn zscore_ids(
 async fn payout_overview(
     info: web::Query<CoinQuery>,
     api_data: web::Data<SickApiData>,
-) -> impl Responder {
+) -> SickResult {
     let mut mysql_con = api_data.mysql.get_conn().unwrap();
 
     let curtime = SystemTime::now()
@@ -805,60 +808,18 @@ async fn payout_overview(
 
     let next: i64 = if curtime > next { -1 } else { next };
 
-    HttpResponse::Ok().body(
-        json!({
-            "error": Value::Null,
+    SickResult {
+        status_code: StatusCode::OK,
+        result: json!({
             "nextPayout": next,
             "totalPaid": amount,
             "totalPayouts": count,
             "scheme": "PPLNS",
             "fee": api_data.fee,
             "minimumThreshold": api_data.min_payout,
-        })
-        .to_string(),
-    )
+        }),
+        error: Value::Null,
+    }
 }
-
-pub async fn cmd_res<T: serde::Serialize + FromRedisValue>(
-    con: &mut ConnectionManager,
-    cmd: &redis::Cmd,
-) -> impl Responder {
-    let res: T = match cmd.query_async(con).await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Database error: {}", e);
-            return redis_error();
-        }
-    };
-
-    let json_res = json!({"result":
-            res, "error": Value::Null
-    })
-    .to_string();
-
-    return HttpResponse::Ok().body(json_res);
-}
-
-// impl redis::FromRedisValue for Solver {
-//     fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
-//         let vec: Vec<String> = redis::from_redis_value(value)?;
-
-//         if vec.len() != 5 {
-//             return Err(redis::RedisError::from((
-//                 redis::ErrorKind::TypeError,
-//                 "Failed to parse solver",
-//                 format!("Failed to parse solver {:?}", value),
-//             )));
-//         };
-
-//         Ok(Solver {
-//             address: vec[0].clone(),
-//             hashrate: vec[1].parse().unwrap_or(0f64),
-//             balance: vec[2].parse().unwrap_or(0f64),
-//             joined: vec[3].parse().unwrap(), // don't handle
-//             // worker_count: vec[4].parse().unwrap_or(0),
-//         })
-//     }
-// }
 
 // round effort and blocks mined 1 day interval, 30d capacity
