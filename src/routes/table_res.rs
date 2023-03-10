@@ -1,12 +1,7 @@
 extern crate redis;
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
-pub struct TableRes<T> {
-    pub total: u64,
-    pub entries: Vec<T>,
-}
-
+use super::types::TableRes;
 
 impl<T: redis::FromRedisValue> redis::FromRedisValue for TableRes<T> {
     fn from_redis_value(value: &redis::Value) -> redis::RedisResult<Self> {
@@ -17,7 +12,7 @@ impl<T: redis::FromRedisValue> redis::FromRedisValue for TableRes<T> {
                 total: 0,
             });
         }
-        let total_res_count: u64 = redis::from_redis_value(items.first().unwrap())?;
+        let total_res_count: usize = redis::from_redis_value(items.first().unwrap())?;
 
         let item_arr: Vec<redis::Value> = redis::from_redis_value(&items[1])?;
         let mut results: Vec<T> = Vec::new();

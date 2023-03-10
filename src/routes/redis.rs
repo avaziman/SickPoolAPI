@@ -5,7 +5,7 @@ use redis_ts::{
     AsyncTsCommands, TsAggregationType, TsBucketTimestamp, TsFilterOptions, TsMrange, TsRange, TsRangeQuery,
 };
 
-use super::history::{TimeSeriesInterval, ValueTypeTrait};
+use super::{history::{TimeSeriesInterval}, types::ValueTypeTrait};
 
 pub fn key_format<const N: usize>(strs: &[&str; N]) -> String {
     let mut res: String = String::new();

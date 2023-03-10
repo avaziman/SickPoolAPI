@@ -1,11 +1,13 @@
-use crate::api_data::{CoinQuery, SickApiData};
+use crate::api_data::{SickApiData};
 use crate::routes::solver::SolverInfo;
+use crate::routes::types::{SickResult, PoolOverview};
 use actix_web::http::StatusCode;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
+use ts_rs::TS;
 extern crate redis;
 use std::fmt;
 
-use super::block::BlockSubmission;
+use super::types::*;
 use crate::redis_interop::ffi::{self};
 use crate::routes::redis::{get_ts_values, key_format};
 
@@ -21,32 +23,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use super::history::{self, SickResult, TimeSeriesInterval, HistoryResult, ValuesTrait, TimestampInfo};
+use super::history::{self, TimeSeriesInterval};
 use super::payout::Payout;
 use super::solver::{solver_overview, Solver};
-use super::table_res::TableRes;
 use ffi::Prefix;
 use mysql::prelude::*;
 use mysql::*;
 
 // use redisearch_api::{init, Document, FieldType, Index, TagOptions};
 use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize)]
-struct TableQuerySort {
-    coin: String,
-    page: u32,
-    limit: u8,
-    sortby: String,
-    sortdir: String,
-    // chains: Vec<String>,
-}
-#[derive(Deserialize)]
-struct TableQuery {
-    coin: String,
-    page: u32,
-    limit: u8,
-}
 
 pub fn pool_route(cfg: &mut web::ServiceConfig) {
     cfg.service(pool_overview);
@@ -284,10 +269,10 @@ struct MiniChart {
 // }
 
 #[get("/overview")]
-async fn pool_overview(
+pub async fn pool_overview(
     info: web::Query<CoinQuery>,
     api_data: web::Data<SickApiData>,
-) -> SickResult {
+) -> SickResult<PoolOverview> {
     let mut con = api_data.redis.clone();
 
     let pool_hashrate_key = format!("{}:HASHRATE:POOL", &info.coin);
@@ -322,36 +307,13 @@ async fn pool_overview(
 
     SickResult {
         status_code: StatusCode::OK,
-        error: Value::Null,
-        result: json!({
-            "poolHashrate": pool_hr,
-            "networkHashrate": net_hr,
-            "minerCount": minr_cnt,
-            "workerCount": wker_cnt
+        error: None,
+        result: Some(PoolOverview {
+            pool_hashrate: pool_hr,
+            network_hashrate: net_hr,
+            miner_count: minr_cnt,
+            worker_count: wker_cnt,
         }),
-    }
-}
-
-async fn ts_get_res<T: serde::Serialize + FromRedisValue>(
-    con: &mut ConnectionManager,
-    key: &String,
-) -> SickResult {
-    let latest: (u64, T) = match con.ts_get(key).await {
-        Ok(res) => match res {
-            Some(tuple) => tuple,
-            None => {
-                return redis_error();
-            }
-        },
-        Err(e) => {
-            return redis_error();
-        }
-    };
-
-    SickResult {
-        status_code: StatusCode::OK,
-        error: Value::Null,
-        result: json!(latest.1),
     }
 }
 
@@ -360,7 +322,7 @@ async fn block_overview(
     req: HttpRequest,
     info: web::Query<CoinQuery>,
     api_data: web::Data<SickApiData>,
-) -> SickResult {
+) -> SickResult<BlockOverview> {
     let mut con = api_data.redis.clone();
     let mut mysql_con = api_data.mysql.get_conn().unwrap();
 
@@ -430,17 +392,17 @@ async fn block_overview(
         }
     };
 
-    let mined24h = if mined24h_ts.values.len() > 0 {
-        mined24h_ts.values[0].1
+    let mined24h : u32 = if mined24h_ts.values.len() > 0 {
+        mined24h_ts.values[0].1 as u32
     } else {
         0
     };
 
     let key = key_format(&[&info.coin, &Prefix::DIFFICULTY.to_string()]);
     let difficulty: Option<(u64, f64)> = con.ts_get(key).await.unwrap();
-    let difficulty = difficulty.unwrap_or((0, 0.0)).0;
+    let difficulty = difficulty.unwrap_or((0, 0.0)).1;
 
-    let (mined, orphaned, average_effort, average_duration): (u64, u64, f64, f64) = mysql_con
+    let (mined, orphaned, average_effort, average_duration): (u32, u32, f64, f64) = mysql_con
         .query_first(
             "SELECT mined, orphaned, COALESCE(0, effort_percent / mined), COALESCE(0, duration_ms / mined) FROM block_stats",
         )
@@ -449,21 +411,21 @@ async fn block_overview(
 
     SickResult {
         status_code: StatusCode::OK,
-        result: json!({
-            "currentRound": {
-                "effortPercent": total / estimated * 100.0,
-                "startTime": started as u64
+        result: Some(BlockOverview {
+            current_round: RoundOverview {
+                effort_percent: total / estimated * 100.0,
+                start_time: started as u64
             },
-            "height": height,
-            "orphans": orphaned,
-            "mined": mined,
-            "averageEffort": average_effort,
-            "averageDuration": average_duration,
-            "mined24h": mined24h,
-            "difficulty": difficulty,
-            "confirmations": 10
+            height: height,
+            orphans: orphaned,
+            mined: mined,
+            average_effort: average_effort,
+            average_duration: average_duration,
+            mined24h: mined24h,
+            difficulty: difficulty,
+            confirmations: 10
         }),
-        error: Value::Null,
+        error: None,
     }
 }
 
@@ -477,7 +439,7 @@ impl fmt::Display for ffi::Prefix {
 async fn blocks(
     mut info: web::Query<TableQuerySort>,
     api_data: web::Data<SickApiData>,
-) -> SickResult {
+) -> SickResult<TableRes<BlockSubmission>> {
     let mut con = api_data.mysql.get_conn().unwrap();
     info.sortdir = get_sortdir(&info.sortdir);
 
@@ -490,15 +452,15 @@ async fn blocks(
     {
         return SickResult {
             status_code: StatusCode::BAD_REQUEST,
-            result: Value::Null,
-            error: json!("invalid sort"),
+            result: None,
+            error: Some(String::from("invalid sort")),
         };
     }
 
     let query =
      format!("SELECT blocks.id,status,hash,reward,time_ms,duration_ms,height,difficulty,effort_percent,addresses.address_md5 FROM blocks INNER JOIN addresses ON addresses.id = blocks.miner_id ORDER BY {} {} LIMIT {},{}", &info.sortby, &info.sortdir, info.page * info.limit as u32, info.limit);
 
-    let total: u64 = con
+    let total: usize = con
         .query_first("SELECT mined FROM block_stats")
         .unwrap()
         .unwrap();
@@ -509,7 +471,7 @@ async fn blocks(
             |(
                 id,
                 status,
-                hash_hex,
+                hash,
                 reward,
                 time_ms,
                 duration_ms,
@@ -528,7 +490,7 @@ async fn blocks(
                     height,
                     difficulty,
                     effort_percent,
-                    hash_hex,
+                    hash,
                     solver,
                 }
             },
@@ -542,25 +504,32 @@ async fn blocks(
 
     SickResult {
         status_code: StatusCode::OK,
-        result: json!(res),
-        error: Value::Null,
+        result: Some(res),
+        error: None,
     }
 }
 
-pub fn redis_error() -> SickResult {
+pub fn redis_error<T: Serialize>() -> SickResult<T> {
     SickResult {
         status_code: StatusCode::INTERNAL_SERVER_ERROR,
-        error: json!("Database error"),
-        result: Value::Null,
+        error: Some(String::from("Database error")),
+        result: None,
     }
 }
 
-pub fn history_error<T: Serialize + ValuesTrait + Default>() -> HistoryResult<T>{
-    HistoryResult { timestamps:TimestampInfo { start: 0, interval: 0, amount: 0 }, values: T::default() }
+pub fn history_error<T: Serialize + ValuesTrait + Default + TS>() -> HistoryResult<T> {
+    HistoryResult {
+        timestamps: TimestampInfo {
+            start: 0,
+            interval: 0,
+            amount: 0,
+        },
+        values: T::default(),
+    }
 }
 
 #[get("/payouts")]
-async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> SickResult {
+async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>) -> SickResult<TableRes::<Payout>> {
     let mut con = api_data.mysql.get_conn().unwrap();
 
     let payouts_vec = con
@@ -586,7 +555,7 @@ async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>)
         )
         .unwrap();
 
-    let total: u64 = con
+    let total: usize = con
         .query_first("SELECT count FROM payout_stats")
         .unwrap()
         .unwrap();
@@ -598,8 +567,8 @@ async fn payouts(info: web::Query<TableQuery>, api_data: web::Data<SickApiData>)
 
     SickResult {
         status_code: StatusCode::OK,
-        result: json!(res),
-        error: Value::Null,
+        result: Some(res),
+        error: None,
     }
 }
 
@@ -614,7 +583,7 @@ fn get_sortdir(s: &String) -> String {
 async fn miners(
     mut info: web::Query<TableQuerySort>,
     api_data: web::Data<SickApiData>,
-) -> SickResult {
+) -> SickResult<TableRes::<Solver>> {
     let mut con_redis = api_data.redis.clone();
     let mut con_mysql = api_data.mysql.get_conn().unwrap();
 
@@ -735,7 +704,7 @@ async fn miners(
         });
     }
 
-    let total: u64 = con_mysql
+    let total: usize = con_mysql
         .query_first("SELECT COUNT(*) FROM miners")
         .unwrap()
         .unwrap();
@@ -747,8 +716,8 @@ async fn miners(
 
     SickResult {
         status_code: StatusCode::OK,
-        result: json!(res),
-        error: Value::Null,
+        result: Some(res),
+        error: None,
     }
 }
 
@@ -793,7 +762,7 @@ async fn zscore_ids(
 async fn payout_overview(
     info: web::Query<CoinQuery>,
     api_data: web::Data<SickApiData>,
-) -> SickResult {
+) -> SickResult<PayoutOverview> {
     let mut mysql_con = api_data.mysql.get_conn().unwrap();
 
     let curtime = SystemTime::now()
@@ -801,7 +770,7 @@ async fn payout_overview(
         .unwrap()
         .as_millis() as i64;
 
-    let (count, amount, next): (u64, u64, i64) = mysql_con
+    let (count, amount, next): (u32, u64, i64) = mysql_con
         .query_first("SELECT count, amount, next_ms FROM payout_stats")
         .unwrap()
         .unwrap();
@@ -810,15 +779,15 @@ async fn payout_overview(
 
     SickResult {
         status_code: StatusCode::OK,
-        result: json!({
-            "nextPayout": next,
-            "totalPaid": amount,
-            "totalPayouts": count,
-            "scheme": "PPLNS",
-            "fee": api_data.fee,
-            "minimumThreshold": api_data.min_payout,
+        result: Some( PayoutOverview {
+            next_payout: next,
+            total_paid: amount,
+            total_payouts: count,
+            scheme: String::from("PPLNS"),
+            fee: api_data.fee,
+            minimum_threshold: api_data.min_payout,
         }),
-        error: Value::Null,
+        error: None,
     }
 }
 

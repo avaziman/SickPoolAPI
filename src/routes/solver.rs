@@ -1,7 +1,6 @@
 use crate::routes::redis::key_format;
 use crate::SickApiData;
 
-use super::table_res::TableRes;
 use crate::redis_interop::ffi::Prefix;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use mysql::prelude::*;

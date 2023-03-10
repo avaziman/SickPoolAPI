@@ -1,14 +1,17 @@
 use crate::routes::history::get_timestamp_info;
-use crate::routes::history::HistoryResult;
-use crate::routes::history::SickResult;
 use crate::routes::pool::history_error;
 use crate::routes::pool::redis_error;
 use crate::routes::redis::get_range_params;
+use crate::routes::types::HistoryResult;
+use crate::routes::types::MinerStats;
+use crate::routes::types::SickResult;
 use crate::SickApiData;
+use crate::routes::types::TableRes;
+use crate::routes::types::WorkerStatsEntry;
 
-use super::history::ValuesTrait;
 use super::redis::get_range_query;
 use super::solver::OverviewQuery;
+use super::types::ValuesTrait;
 use crate::ffi::Prefix;
 use crate::routes::redis::fill_gaps;
 use crate::routes::redis::key_format;
@@ -23,21 +26,9 @@ use serde_json::{json, Value};
 
 pub fn miner_route(cfg: &mut web::ServiceConfig) {
     cfg.service(stats_history);
-    cfg.service(worker_history);
+    // cfg.service(worker_history);
     cfg.service(workers);
 }
-
-#[repr(C)]
-#[derive(Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-struct MinerStats {
-    average_hashrate: Vec<f64>,
-    current_hashrate: Vec<f64>,
-    invalid_shares: Vec<u64>,
-    stale_shares: Vec<u64>,
-    valid_shares: Vec<u64>,
-}
-impl ValuesTrait for MinerStats {}
 
 // struct HashrateEntry {
 //     average_hashrate: f64,
@@ -47,17 +38,6 @@ impl ValuesTrait for MinerStats {}
 //     time: u64,
 //     valid_shares: u64,
 // }
-
-#[derive(Serialize, Clone)]
-struct WorkerStatsEntry {
-    worker: String,
-    average_hashrate: f64,
-    current_hashrate: f64,
-    invalid_shares: u64,
-    stale_shares: u64,
-    time: u64,
-    valid_shares: u64,
-}
 
 #[derive(Serialize, Clone)]
 struct WorkerTsEntry {
@@ -96,7 +76,6 @@ async fn stats_history(
     {
         Ok(res) => res,
         Err(err) => {
-            eprintln!("range query error: {}", err);
             return history_error();
         }
     };
@@ -124,19 +103,19 @@ async fn stats_history(
             .next()
             .unwrap()
             .iter()
-            .map(|x| *x as u64)
+            .map(|x| *x as u32)
             .collect(),
         stale_shares: into_iter
             .next()
             .unwrap()
             .iter()
-            .map(|x| *x as u64)
+            .map(|x| *x as u32)
             .collect(),
         valid_shares: into_iter
             .next()
             .unwrap()
             .iter()
-            .map(|x| *x as u64)
+            .map(|x| *x as u32)
             .collect(),
     };
 
@@ -146,57 +125,57 @@ async fn stats_history(
     }
 }
 
-#[get("/workerHistory")]
-async fn worker_history(
-    req: HttpRequest,
-    info: web::Query<OverviewQuery>,
-    api_data: web::Data<SickApiData>,
-) -> SickResult {
-    let mut con = api_data.redis.clone();
+// #[get("/workerHistory")]
+// async fn worker_history(
+//     req: HttpRequest,
+//     info: web::Query<OverviewQuery>,
+//     api_data: web::Data<SickApiData>,
+// ) -> SickResult {
+//     let mut con = api_data.redis.clone();
 
-    let ts_type = "worker-count";
+//     let ts_type = "worker-count";
 
-    let filter: TsFilterOptions = miner_alias_filter(&info.address).equals("type", ts_type);
+//     let filter: TsFilterOptions = miner_alias_filter(&info.address).equals("type", ts_type);
 
-    let tms: TsMrange<u64, f64> = match con.ts_mrange(TsRangeQuery::default(), filter).await {
-        Ok(res) => res,
-        Err(err) => {
-            eprintln!("range query error: {}", err);
-            return redis_error();
-        }
-    };
+//     let tms: TsMrange<u64, f64> = match con.ts_mrange(TsRangeQuery::default(), filter).await {
+//         Ok(res) => res,
+//         Err(err) => {
+//             eprintln!("range query error: {}", err);
+//             return redis_error();
+//         }
+//     };
 
-    let ts = match tms.values.first() {
-        Some(res) => res,
-        None => {
-            return redis_error();
-        }
-    };
+//     let ts = match tms.values.first() {
+//         Some(res) => res,
+//         None => {
+//             return redis_error();
+//         }
+//     };
 
-    let mut res_vec: Vec<WorkerTsEntry> = Vec::new();
-    res_vec.reserve(ts.values.len());
+//     let mut res_vec: Vec<WorkerTsEntry> = Vec::new();
+//     res_vec.reserve(ts.values.len());
 
-    // timeserieses are sorted by alphabetical order
-    for (i, el) in ts.values.iter().enumerate() {
-        res_vec.push(WorkerTsEntry {
-            time: el.0,
-            workers: el.1 as u32,
-        });
-    }
+//     // timeserieses are sorted by alphabetical order
+//     for (i, el) in ts.values.iter().enumerate() {
+//         res_vec.push(WorkerTsEntry {
+//             time: el.0,
+//             workers: el.1 as u32,
+//         });
+//     }
 
-    SickResult {
-        status_code: StatusCode::OK,
-        error: Value::Null,
-        result: json!(res_vec),
-    }
-}
+//     SickResult {
+//         status_code: StatusCode::OK,
+//         error: None,
+//         result: Some(res_vec),
+//     }
+// }
 
 #[get("/workers")]
 async fn workers(
     req: HttpRequest,
     info: web::Query<OverviewQuery>,
     api_data: web::Data<SickApiData>,
-) -> SickResult {
+) -> SickResult<TableRes<WorkerStatsEntry>> {
     let mut con = api_data.redis.clone();
 
     let ts_type = format!(
@@ -262,10 +241,10 @@ async fn workers(
 
     SickResult {
         status_code: StatusCode::OK,
-        error: Value::Null,
-        result: json!({
-            "total": res_vec.len(),
-            "entries": res_vec,
+        error: None,
+        result: Some(TableRes {
+            total: res_vec.len(),
+            entries: res_vec,
         }),
     }
 }

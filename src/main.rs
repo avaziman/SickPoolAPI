@@ -3,9 +3,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use actix_web::{get, middleware, web, App, HttpServer, Responder};
+use actix_web::{get, middleware, App, HttpServer, Responder, HttpResponse, web::{self, Json}};
 use mysql::OptsBuilder;
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 extern crate redis;
 use env_logger::Env;
 use std::env;
@@ -19,8 +18,7 @@ use routes::solver;
 mod api_data;
 use api_data::SickApiData;
 
-mod redis_interop;
-use redis_interop::ffi;
+mod redis_interop;use redis_interop::ffi;
 
 use mysql::Pool;
 mod pool_events;
@@ -35,6 +33,13 @@ use config::CoinConfig;
 use crate::routes::history::get_time_series;
 use crate::routes::history::TimeSeriesInterval;
 use serde_json::json;
+use crate::routes::types::*;
+
+// #[derive(OpenApi)]
+// #[openapi(
+//     paths(crate::routes::pool::pool_overview),
+//     components(schemas(SickResult<PoolOverview>))
+// )]
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -61,7 +66,8 @@ async fn main() -> std::io::Result<()> {
     let pool = Pool::new(mysql_opts).expect("Can't connect to MySql DB");
 
     println!("Connecting to redisDB...");
-    let client = redis::Client::open(String::from("redis://") + &config.redis.host).expect("Can't create Redis client");
+    let client = redis::Client::open(String::from("redis://") + &config.redis.host)
+        .expect("Can't create Redis client");
     let con_manager: redis::aio::ConnectionManager = client
         .get_tokio_connection_manager()
         .await
@@ -94,20 +100,31 @@ async fn main() -> std::io::Result<()> {
         let cors = actix_cors::Cors::default().allow_any_origin();
 
         App::new()
+
             .service(
                 web::scope("/api")
+                    // .route(
+                    //     "/openapi.json",
+                    //     web::get().to(|| async { HttpResponse::Ok().json(ApiDoc::openapi()) }),
+                    // )
+                    // .service(
+                    //     SwaggerUi::new("/swagger-ui/{_:.*}")
+                    //         .url("/api/openapi.json", Default::default())
+                    //         .config(Config::default().try_it_out_enabled(true).filter(true))/* tries to fetch wrong url so route */
+                    // )
+
                     .app_data(web::Data::new(SickApiData {
                         redis: con_manager.clone(),
                         mysql: pool.clone(),
                         hashrate_interval: hr_timeseries.clone(),
                         block_interval: block_timeseries.clone(),
                         min_payout: config.min_payout_threshold,
-                        fee: config.pow_fee
+                        fee: config.pow_fee,
                     }))
-                    .service(web::scope("/pool").configure(pool::pool_route))
-                    .service(web::scope("/network").configure(network::network_route))
-                    .service(web::scope("/miner").configure(miner::miner_route))
-                    .service(web::scope("/solver").configure(solver::solver_route)),
+                    // .service(web::scope("/pool").configure(pool::pool_route))
+                    // .service(web::scope("/network").configure(network::network_route))
+                    // .service(web::scope("/miner").configure(miner::miner_route))
+                    // .service(web::scope("/solver").configure(solver::solver_route)),
             )
             .wrap(cors)
         // .wrap(middleware::Logger::default())

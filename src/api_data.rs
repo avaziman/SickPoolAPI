@@ -9,8 +9,3 @@ pub struct SickApiData {
     pub min_payout: u64,
     pub fee: f64,
 }
-
-#[derive(Deserialize)]
-pub struct CoinQuery {
-    pub coin: String,
-}
